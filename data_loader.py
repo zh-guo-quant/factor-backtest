@@ -97,7 +97,7 @@ def _schema() -> SourceSchema:
         schema = SOURCES[config.SOURCE]
     except KeyError:
         raise KeyError(
-            f"Unknown source {config.SOURCE!r}.Known sources: {sorted(SOURCES)}."
+            f"Unknown source {config.SOURCE!r}. Known sources: {sorted(SOURCES)}. "
         ) from None
     schema.validate()
     return schema
@@ -215,7 +215,7 @@ def _validate(panel: pd.DataFrame, field: str) -> None:
           f"NaN mean {missing.mean():.3%} max {missing.max():.3%}")
 
 def _cache_path(field: str) -> Path:
-    return config.DATA_DIR / f"panel_{field}.parquet"
+    return config.DATA_DIR / f"{config.SOURCE}_{field}.parquet"
 
 def _build_all(schema: SourceSchema) -> None:
     """Read the raw file once, write one parquet panel per declared field."""
