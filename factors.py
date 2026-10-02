@@ -11,27 +11,27 @@ Timing
 These panels are as-of t. The one-period lag between observing a signal and holding the position is applied once, in backtest.py - never here.
 """
 
-from typing import Callable, NamedTuple
+from typing import Callable, Mapping, NamedTuple
 
 import numpy as np
 import pandas as pd
 
 import config
-from data_loader import load_prices
+from data_loader import load_prices, load_panel
 
 # --- Factor definitions ----------------------------------------------------------------------------
 
-def momentum(prices: pd.DataFrame) -> pd.DataFrame:
+def momentum(close: pd.DataFrame) -> pd.DataFrame:
     """12-month return, skipping the most recent month. Warmup: MOM_LOOKBACK."""
-    return prices.shift(config.MOM_SKIP) / prices.shift(config.MOM_LOOKBACK) - 1
+    return close.shift(config.MOM_SKIP) / close.shift(config.MOM_LOOKBACK) - 1
 
-def reversal(prices: pd.DataFrame) -> pd.DataFrame:
+def reversal(close: pd.DataFrame) -> pd.DataFrame:
     """Negated 1-month return - losers are expected to bounce. Warmup: REV_LOOKBACK."""
-    return -(prices.shift(config.REV_SKIP) / prices.shift(config.REV_SKIP + config.REV_LOOKBACK) - 1)
+    return -(close.shift(config.REV_SKIP) / close.shift(config.REV_SKIP + config.REV_LOOKBACK) - 1)
 
-def low_volatility(prices: pd.DataFrame) -> pd.DataFrame:
+def low_volatility(close: pd.DataFrame) -> pd.DataFrame:
     """Negated trailing volatility of daily returns. Warmup: VOL_LOOKBACK."""
-    returns = prices.pct_change()
+    returns = close.pct_change()
     return -returns.rolling(config.VOL_LOOKBACK).std()
 
 # --- Register factors ---------------------------------------------------------------------------------
@@ -39,8 +39,9 @@ def low_volatility(prices: pd.DataFrame) -> pd.DataFrame:
 class Factor(NamedTuple):
     """A factor and the number of leading rows it cannot produce a value for."""
 
-    fn: Callable[[pd.DataFrame], pd.DataFrame]
+    fn: Callable[..., pd.DataFrame]
     warmup: int
+    inputs: tuple[str, ...] = ("close",)
 
 FACTORS = {
     "momentum": Factor(momentum, config.MOM_LOOKBACK),
@@ -51,20 +52,20 @@ FACTORS = {
 # --- public API -----------------------------------------------------------------------------------------
 
 def _validate_factor(
-        factor: pd.DataFrame, prices: pd.DataFrame, name: str, warmup: int
+        factor: pd.DataFrame, reference: pd.DataFrame, name: str, warmup: int
 ) -> None:
     """Post-conditions every factor panel must satisfy."""
-    if factor.shape != prices.shape:
+    if factor.shape != reference.shape:
         raise ValueError(
-            f"{name}: shape {factor.shape} differs from prices {prices.shape}."
+            f"{name}: shape {factor.shape} differs from reference {reference.shape}."
         )
-    if not factor.index.equals(prices.index):
+    if not factor.index.equals(reference.index):
         raise ValueError(
-            f"{name}: index {factor.index} differs from prices {prices.index}."
+            f"{name}: index {factor.index} differs from reference {reference.index}."
         )
-    if not factor.columns.equals(prices.columns):
+    if not factor.columns.equals(reference.columns):
         raise ValueError(
-            f"{name}: columns {factor.columns} differs from prices {prices.columns}."
+            f"{name}: columns {factor.columns} differs from reference {reference.columns}."
         )
 
     if warmup >= len(factor):
@@ -87,8 +88,24 @@ def _validate_factor(
         raise ValueError(
             f"{name}: {n_inf} infinite values found."
         )
-    
-def compute(name:str, prices: pd.DataFrame | None = None) -> pd.DataFrame:
+
+def _gather(
+        spec: Factor, panels: Mapping[str, pd.DataFrame] | None
+) -> dict[str, pd.DataFrame]:
+    """The panels a factor declares, taken from 'panels' or loaded on demand."""
+    panels = panels or {}
+    inputs = {f: panels[f] if f in panels else load_panel(f) for f in spec.inputs}
+
+    ref_name = spec.inputs[0]
+    ref = inputs[ref_name]
+    for f, panel in inputs.items():
+        if not(panel.index.equals(ref.index) and panel.columns.equals(ref.columns)):
+            raise ValueError(
+                f"input {f!r} is not aligned with {ref_name!r}. "
+            )
+    return inputs
+
+def compute(name:str, panels: Mapping[str, pd.DataFrame] | None = None) -> pd.DataFrame:
     """Compute one factor by name. The only supported way to get a factor."""
     try:
         spec = FACTORS[name]
@@ -97,17 +114,15 @@ def compute(name:str, prices: pd.DataFrame | None = None) -> pd.DataFrame:
             f"Unknown factor {name!r}; known factors: {sorted(FACTORS)}."
         ) from None
 
-    if prices is None:
-        prices = load_prices()
-
-    factor = spec.fn(prices)
-    _validate_factor(factor, prices, name, spec.warmup)
+    inputs = _gather(spec, panels)
+    factor = spec.fn(**inputs)
+    _validate_factor(factor, inputs.get(spec.inputs[0]), name, spec.warmup)
     return factor
 
 if __name__ == "__main__":
-    prices = load_prices()
+    panels = {"close": load_panel("close")}
     for name in FACTORS:
-        f = compute(name, prices)
+        f = compute(name, panels)
         first = int(f.notna().any(axis = 1).argmax())
         print(f"{name:<10} shape {f.shape} first valid row {first:>4} "
               f"({f.index[first].date()}) coverage {f.notna().mean().mean():.1%}")
