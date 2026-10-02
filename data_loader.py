@@ -121,7 +121,7 @@ def _verify_schema(schema: SourceSchema) -> None:
             raise KeyError(
                 f"{name} is missing declared columns {missing}. "
                 f"Actual columns: {present}. "
-                f"Fix the SourceSchema for {config.SOURCE!r}, or run suggested_schema(). "
+                f"Fix the SourceSchema for {config.SOURCE!r}, or run suggest_schema(). "
             )
 
     else:
@@ -189,6 +189,14 @@ def _build_panels(schema: SourceSchema) -> dict[str, pd.DataFrame]:
     if schema.layout == "long":
         raw = _read_long(schema)
         print(f" read {len(raw):,} rows * {len(raw.columns)} columns")
+
+        dupes = raw.duplicated(subset = [schema.date, schema.symbol])
+        if dupes.any():
+            raise ValueError(
+                f"{int(dupes.sum()):,} duplicate (date, symbol) rows in"
+                f"{config.RAW_PRICE_FILE.name}. Inspect them and decide explicitly "
+                f"how to resolve - do not silently average."
+            )
         return {field: _pivot(raw, schema, field) for field in schema.fields}
 
     raise NotImplementedError(
@@ -237,7 +245,7 @@ def load_panel(field:str, force_rebuild: bool = False) -> pd.DataFrame:
     available = _declared_fields(schema)
     if field not in available:
         raise KeyError(
-            f"Source {config.SOURCE!r} does not provide {field!r};"
+            f"Source {config.SOURCE!r} does not provide {field!r}; "
             f"it provides {sorted(available)}. "
         )
 
