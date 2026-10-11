@@ -19,5 +19,16 @@ VOL_LOOKBACK = 60      # low-volatility: trailing 60 days
 
 # --- Paths ---
 DATA_DIR   = ROOT / "data"
-RAW_PRICE_FILE = DATA_DIR / "synthetic_prices.csv.gz"
 SOURCE = "synthetic"
+RAW_FILES = {
+    "synthetic": DATA_DIR / "synthetic_prices.csv.gz",  # engine input, synthetic
+    "wrds": DATA_DIR / "wrds_clean.csv.gz",             # engine input, written by prepare_wrds.py
+}
+RAW_PRICE_FILE = RAW_FILES[SOURCE]
+
+# --- RWDS source (read only by prepare_wrds.py) ---
+WRDS_RAW_FILE = DATA_DIR / "wrds_uk_prices.csv.gz"
+WRDS_SHA256 = "63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f8"
+
+# --- Universe ---
+PRICE_FLOOR = 0.10

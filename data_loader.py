@@ -1,8 +1,8 @@
 """Load raw price data into wide price panel, cached as parquet.
 
-This module is the project's only data boundary: no other file reads a raw
-price file. Adding a data source means adding a SourceSchema to SOURCES;
-nothing downstream changes.
+This module is the project's only data boundary: no other file reads a raw price file.
+Every source arrives as one long file written by its own prepare script (e.g. prepare_wrds.py).
+Adding a source means adding a SourceSchema to SOURCES.
 
 Panel Contract
 --------------
@@ -22,74 +22,61 @@ import config
 
 FIELD_DTYPES = {
     "close": "float32",
+    "raw_close": "float32",
     "vwap": "float32",
     "dollar_volume": "float32",
     "is_tradable": "bool",
 }
 
 FIELDS = tuple(FIELD_DTYPES)
-POSITIVE_FIELDS = ("close", "vwap")
+POSITIVE_FIELDS = ("close", "raw_close", "vwap")
 
-DATE_NAMES = {"date", "datetime", "time", "timestamp", "dt", "trade_date"}
-SYMBOL_NAMES = {"ticker", "symbol", "sid", "asset", "code", "stock", "permno"}
-FIELD_NAMES ={
-    "close": {"close", "adj_close", "adjclose", "price", "px", "px_last"},
-    "vwap": {"vwap", "twap", "avg_price"},
-    "dollar_volume": {"dollar_volume", "turnover", "amount", "value_traded"},
-    "is_tradable": {"is_tradable", "tradable", "tradeable", "active"},
-}
 
 # --- Source declarations --------------------------------------------------------
 
 class SourceSchema(NamedTuple):
-    """How one data source lays out its columns. Declared."""
+    """How one long source file names its columns. Declared."""
 
-    layout : str                            # "long" or "wide"
     date : str                              # the date column
     symbol : str | None = None              # long only: the symbol column
     fields : dict[str, str] | None = None   # long only: canonical -> source column
-    value_field : str | None = None         # wide only: what the symbol columns hold
 
     def validate(self) -> None:
-        if self.layout == "long":
-            if not self.symbol or not self.fields:
-                raise ValueError("Long layout needs both 'symbol' and 'fields'")
-
-            unknown = set(self.fields) - set(FIELDS)
-            if unknown:
-                raise ValueError(
-                    f"Unknown canonical fields {sorted(unknown)}; expected {FIELDS}. "
-                )
-
-            bad = {k: v for k, v in self.fields.items() if not isinstance(v, str)}
-            if bad:
-                raise ValueError(
-                    f"`fields` values must be column-name strings, got {bad}"
-                )
-            
-        elif self.layout == "wide":
-            if not self.value_field:
-                raise ValueError("Wide layout needs 'value_field'")
-            if self.value_field not in FIELDS:
-                raise ValueError(
-                    f"Unknown canonical fields {self.value_field!r}; expected {FIELDS}. "
-                )
-        else:
-            raise ValueError(f"Unknown layout: {self.layout}; use 'long' or 'wide'")
-
+        unknown = set(self.fields) - set(FIELDS)
+        if unknown:
+            raise ValueError(
+                f"Unknown canonical fields {sorted(unknown)}; expected {FIELDS}."
+            )
+        bad = {k: v for k, v in self.fields.items() if not isinstance(v, str)}
+        if bad:
+            raise ValueError(
+                f"'fields' value must be column-name strings, got {bad}."
+            )
+        
 SYNTHETIC = SourceSchema(
-    layout = "long",
     date = "date",
     symbol = "symbol",
     fields = {
         "close": "close",
+        "raw_close": "close",
         "vwap": "vwap",
         "dollar_volume": "dollar_volume",
         "is_tradable": "is_tradable"
     }
 )
 
-SOURCES = {"synthetic": SYNTHETIC}
+WRDS = SourceSchema(
+    date = "date",
+    symbol = "symbol",
+    fields = {
+        "close": "close",
+        "raw_close": "raw_close",
+        "dollar_volume": "dollar_volume",
+        "is_tradable": "is_tradable",
+    }
+)
+
+SOURCES = {"synthetic": SYNTHETIC, "wrds": WRDS}
 
 def _schema() -> SourceSchema:
     """The schema for the source config selects."""
@@ -105,44 +92,18 @@ def _schema() -> SourceSchema:
 def _verify_schema(schema: SourceSchema) -> None:
     """Read five rows and confirm the file matches what the schema declares."""
     present = list(pd.read_csv(config.RAW_PRICE_FILE, nrows = 5).columns)
-    present_set = set(present)
-    name = config.RAW_PRICE_FILE.name
-
-    if schema.date not in present_set:
-        raise KeyError(
-            f"{name}: declared date column {schema.date!r} is absent. "
-            f"Actual columns: {present}. "
-        )
+    declared = dict.fromkeys([schema.date, schema.symbol, *schema.fields.values()])
+    missing = [c for c in declared if c not in present]
     
-    if schema.layout == "long":
-        declared = [schema.symbol, *schema.fields.values()]
-        missing = [c for c in declared if c not in present_set]
-        if missing:
-            raise KeyError(
-                f"{name} is missing declared columns {missing}. "
-                f"Actual columns: {present}. "
-                f"Fix the SourceSchema for {config.SOURCE!r}, or run suggest_schema(). "
-            )
-
-    else:
-        symbol_cols = [c for c in present if c != schema.date]
-        if not symbol_cols:
-            raise ValueError(f"{name}: layout = 'wide' but no symbol columns found.")
-
-        reserved = SYMBOL_NAMES.union(*FIELD_NAMES.values())
-        field_like = [c for c in symbol_cols if str(c).strip().lower() in reserved]
-        if field_like:
-            raise ValueError(
-                f"{name}: layout='wide' but columns {field_like} are field names, "
-                f"not symbols - this file is probably long. "
-                f"Fix the SourceSchema for {config.SOURCE!r}, or run suggest_schema()."
-            )
+    if missing:
+        raise KeyError(
+            f"{config.RAW_PRICE_FILE.name} is missing declared columns {missing}, "
+            f"Actual columns: {present}. Fix the SourceSchema for {config.SOURCE!r}."
+        )
 
 def _declared_fields(schema: SourceSchema) -> tuple[str, ...]:
     """Canonical field names this source provide, whatever its layout."""
-    if schema.layout == "long":
-        return tuple(schema.fields)
-    return (schema.value_field,)
+    return tuple(schema.fields)
 
 def _read_long(schema: SourceSchema) -> pd.DataFrame:
     """Read only the declared columns from a long file. No reshaping here."""
@@ -175,34 +136,28 @@ def _pivot(raw: pd.DataFrame, schema: SourceSchema, field: str) -> pd.DataFrame:
             f"how to resolve - do not silently average."
         ) from exc
 
-    panel = panel.astype(FIELD_DTYPES[field])
+    if FIELD_DTYPES[field] == "bool":
+        panel = panel.eq(True)          # a missing (date, symbol) is not tradable
+    else:
+        panel = panel.astype(FIELD_DTYPES[field])
     panel.index.name = "date"
     panel.columns.name = "symbol"
     return panel.sort_index().sort_index(axis = 1)
 
 def _build_panels(schema: SourceSchema) -> dict[str, pd.DataFrame]:
-    """Every panel this source provides, keyed by canonical field name.
+    """Every panel this source provides, keyed by canonical field name."""
+    
+    raw = _read_long(schema)
+    print(f" read {len(raw):,} rows * {len(raw.columns)} columns")
 
-    This is the only place layout is branched on: everything below sees the
-    same thing, a dict of aligned wide panels.
-    """
-    if schema.layout == "long":
-        raw = _read_long(schema)
-        print(f" read {len(raw):,} rows * {len(raw.columns)} columns")
-
-        dupes = raw.duplicated(subset = [schema.date, schema.symbol])
-        if dupes.any():
-            raise ValueError(
-                f"{int(dupes.sum()):,} duplicate (date, symbol) rows in"
-                f"{config.RAW_PRICE_FILE.name}. Inspect them and decide explicitly "
-                f"how to resolve - do not silently average."
-            )
-        return {field: _pivot(raw, schema, field) for field in schema.fields}
-
-    raise NotImplementedError(
-        "layout='wide' is declared and verified but not yet loadable; "
-        "implement _read_wide() when a real wide source arrives."
-    )
+    dupes = raw.duplicated(subset = [schema.date, schema.symbol])
+    if dupes.any():
+        raise ValueError(
+            f"{int(dupes.sum()):,} duplicate (date, symbol) rows in "
+            f"{config.RAW_PRICE_FILE.name}. Inspect them and decide explicitly "
+            f"how to resolve - do not silently average."
+        )
+    return {field: _pivot(raw, schema, field) for field in schema.fields}
 
 def _validate(panel: pd.DataFrame, field: str) -> None:
     """Fail on anything the engine would otherwise mis-compute silently."""
