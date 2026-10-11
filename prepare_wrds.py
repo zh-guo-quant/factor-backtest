@@ -164,6 +164,60 @@ def mark_currency_breaks(df):
         df.loc[df["currency_break"], "sid"].nunique())
     return df.drop(columns = "breaks_so_far")
 
+
+# %% Block 4. R4 stuck adjustment, R6 bad prints (price-level fixes)
+# =================================================================================================
+
+R4_FACTOR_MOVE = 0.20
+# R6: prices that are bad prints; each must match exactly one row.
+BAD_PRINTS = [
+    ("284812_02W", "2017-06-16"),   # STM Group: 0.43 -> 13.601 -> 0.42
+    ("204760_01W", "2017-03-27"),   # H.C. Slingsby: 0.425 -> 0.20 -> 0.375
+]
+
+def positive(values):
+    """True where a value is present, finite and strictly positive."""
+    return values.notna() & np.isfinite(values) & values.gt(0)
+
+def fix_stuck_adjustments(df):
+    """R4: a factor move above 20% with an unchanged raw price means the price
+    has not yet been updated for the corporate action.
+    
+    The price is set to missing from the event row until the raw price next changes.
+    The rows before the event keep their prices, even if it is the same.
+    """
+    previous = df.groupby("sid", sort = False)[["prccd", "ajexdi", "trfd"]].shift(1)
+    valid = (positive(df["prccd"]) & positive(df["ajexdi"]) & positive(df["trfd"])
+             & positive(previous["prccd"]) & positive(previous["ajexdi"])
+             & positive(previous["trfd"]) & ~df["currency_break"])
+    factor_step = (df["trfd"] / df["ajexdi"]) / (previous["trfd"] / previous["ajexdi"])
+    event = valid & df["prccd"].eq(previous["prccd"]) & (factor_step - 1).abs().gt(R4_FACTOR_MOVE)
+
+    # Number of each run of equal prices within a sid; the event sits inside a run.
+    new_run = df["sid"].ne(df["sid"].shift(1)) | df["prccd"].ne(df["prccd"].shift(1))
+    run = new_run.cumsum()
+
+    # From the event row to the end of its run (cummax keeps True once seen).
+    stuck = event.groupby(run).cummax()
+    log("R4", "stuck adjustment events", event.sum(), df.loc[event, "sid"].nunique())
+    log("R4", "price set to missing", stuck.sum(), df.loc[stuck, "sid"].nunique())
+    df.loc[stuck, "prccd"] = np.nan
+    return df
+
+def remove_bad_prints(df, bad_prints = BAD_PRINTS):
+    """R6: set the listed bad-print prices to missing."""
+    affected = set()
+    for sid, date in bad_prints:
+        hit = df["sid"].eq(sid) & df["datadate"].eq(pd.Timestamp(date))
+        if hit.sum() != 1:
+            raise ValueError(
+                f"R6 bad print {sid} {date}: {int(hit.sum())} matching rows, expected 1"
+            )
+        df.loc[hit, "prccd"] = np.nan
+        affected.add(sid)
+    log("R6", "bad-print prices set to missing", len(bad_prints), len(affected))
+    return df
+
 # =================================================================================================
 def main():
     _LOG.clear()
@@ -173,7 +227,9 @@ def main():
     df = count_currency_breaks(df)
     df = keep_segment(df)
     df = keep_trading_days(df)
-    df= mark_currency_breaks(df)
+    df = mark_currency_breaks(df)
+    df = fix_stuck_adjustments(df)
+    df = remove_bad_prints(df)
     print(f"\n{'rows':<10}{len(df):>12,}")
     print(f"{'sids':<10}{df['sid'].nunique():>12,}")
     print(f"{'companies':<10}{df['gvkey'].nunique():>12,}")
