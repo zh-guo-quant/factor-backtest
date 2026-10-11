@@ -2,7 +2,7 @@
 # =================================================================================================
 """Build the engine input file for source 'wrds' from the audited WRDS_UK file.
 
-Rules (F1 - F3, R1 - R14) are documented in data_audit_wrds_uk.md.
+Rules (F1 - F3, R1 - R14) are documented in docs/data_audit_wrds_uk.md.
 Every step records how many rows it changed, so the log can be checked against the audit report.
 
 Output: data/wrds_clean.csv.gz, one row per company and trading day:
