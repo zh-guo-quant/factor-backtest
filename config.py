@@ -19,7 +19,7 @@ VOL_LOOKBACK = 60      # low-volatility: trailing 60 days
 
 # --- Paths ---
 DATA_DIR   = ROOT / "data"
-SOURCE = "synthetic"
+SOURCE = "wrds"
 RAW_FILES = {
     "synthetic": DATA_DIR / "synthetic_prices.csv.gz",  # engine input, synthetic
     "wrds": DATA_DIR / "wrds_clean.csv.gz",             # engine input, written by prepare_wrds.py
