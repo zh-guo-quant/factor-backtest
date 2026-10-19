@@ -31,7 +31,7 @@ def reversal(close: pd.DataFrame) -> pd.DataFrame:
 
 def low_volatility(close: pd.DataFrame) -> pd.DataFrame:
     """Negated trailing volatility of daily returns. Warmup: VOL_LOOKBACK."""
-    returns = close.pct_change()
+    returns = close.pct_change(fill_method = None)
     return -returns.rolling(config.VOL_LOOKBACK).std()
 
 # --- Register factors ---------------------------------------------------------------------------------
