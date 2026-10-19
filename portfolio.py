@@ -29,9 +29,9 @@ def rebalance_dates(index: pd.DatetimeIndex, freq: str = config.REBALANCE) -> pd
     last = pd.Series(index, index = index).resample(freq).max().dropna()
     return pd.DatetimeIndex(last.to_numpy(), name = index.name)
 
-def eligible(factor: pd.DataFrame, tradable: pd.DataFrame) -> pd.DataFrame:
+def eligible(factor: pd.DataFrame, tradable: pd.DataFrame, raw_close: pd.DataFrame, floor: float = config.PRICE_FLOOR) -> pd.DataFrame:
     """Stocks that may enter the sort: a signal exists and the stock is tradable at time t."""
-    return factor.notna() & tradable
+    return factor.notna() & tradable & raw_close.ge(floor)
 
 def assign_buckets(factor: pd.DataFrame, mask: pd.DataFrame, n_buckets: int) -> pd.DataFrame:
     """Cross-sectional bucket 1..n_buckets per date; NaN for ineligible stocks."""
@@ -85,17 +85,18 @@ def _validate_portfolio(p: Portfolio, mask: pd.DataFrame, n_buckets: int) -> Non
 # --- Public API----------------------------------------------------------------------------------------
 
 def build(
-        factor: pd.DataFrame, tradable: pd.DataFrame, n_buckets: int = config.N_BUCKETS
+        factor: pd.DataFrame, tradable: pd.DataFrame, raw_close: pd.DataFrame, n_buckets: int = config.N_BUCKETS
 ) -> Portfolio:
     """Buckets and long-short weights on every rebalance date that can form one."""
-    if not (tradable.index.equals(factor.index) and tradable.columns.equals(factor.columns)):
-        raise ValueError(
-            f"tradable panel is not aligned with the factor panel."
-        ) 
+    for name, panel in {"tradable": tradable, "raw_close": raw_close}.items():
+        if not (panel.index.equals(factor.index) and panel.columns.equals(factor.columns)):
+            raise ValueError(
+                f"{name} panel is not aligned with the factor panel."
+            )
 
     dates = rebalance_dates(factor.index)
     f = factor.loc[dates]
-    mask = eligible(f, tradable.loc[dates])
+    mask = eligible(f, tradable.loc[dates], raw_close.loc[dates])
 
     buckets = assign_buckets(f, mask, n_buckets).dropna(how = "all")
     weights = long_short_weights(buckets, n_buckets)
@@ -110,8 +111,9 @@ if __name__ == "__main__":
 
     panels = {"close": load_panel("close")}
     tradable = load_panel("is_tradable")
+    raw_close = load_panel("raw_close")
     for name in fx.FACTORS:
-        p = build(fx.compute(name, panels), tradable)
+        p = build(fx.compute(name, panels), tradable, raw_close)
         top = p.buckets == config.N_BUCKETS
         still_top = top & top.shift(-1, fill_value = False)
         n_stay = still_top.sum(axis = 1).iloc[:-1]

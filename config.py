@@ -32,4 +32,4 @@ WRDS_SHA256 = "63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f8"
 WRDS_COMPANY_FILE = DATA_DIR / "wrds_companies.csv"     #written by prepare_wrds.py
 
 # --- Universe ---
-PRICE_FLOOR = 0.10
+PRICE_FLOOR = 0.10     # R7: on raw_close in GBP; robustness check 0.20

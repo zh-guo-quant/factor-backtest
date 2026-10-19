@@ -180,6 +180,10 @@ def _validate(panel: pd.DataFrame, field: str) -> None:
 def _cache_path(field: str) -> Path:
     return config.DATA_DIR / f"{config.SOURCE}_{field}.parquet"
 
+def _cache_is_stale(path: Path) -> bool:
+    """A cache older than the raw file was built from a previous version of it."""
+    return path.stat().st_mtime < config.RAW_PRICE_FILE.stat().st_mtime
+
 def _build_all(schema: SourceSchema) -> None:
     """Read the raw file once, write one parquet panel per declared field."""
     print(f"Building panels from {config.RAW_PRICE_FILE} ...")
@@ -205,7 +209,7 @@ def load_panel(field:str, force_rebuild: bool = False) -> pd.DataFrame:
         )
 
     path = _cache_path(field)
-    if force_rebuild or not path.exists():
+    if force_rebuild or not path.exists() or _cache_is_stale(path):
         _build_all(schema)
     return pd.read_parquet(path)
 
