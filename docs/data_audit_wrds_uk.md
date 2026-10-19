@@ -2,10 +2,16 @@
 
 This document records the cleaning rules adopted for the WRDS UK data, the assumptions
 behind each rule, and the evidence that supports each assumption. The rules are
-implemented in `prepare_wrds.py`. The evidence comes from the audit script `data_test.py`
-and the R10 check script `check_r10.py` (Section 2).
+implemented in `prepare_wrds.py`. The evidence comes from the audit script `data_test.py`,
+the R10 check script `check_r10.py` and manual review (Section 2).
 
-The document contains summary statistics only. The raw file and the script outputs contain
+Two kinds of numbers appear in this project. Audit numbers describe the raw data and come
+from the audit report; they do not change while the input file is the same. The rows each
+cleaning step changes, the final sample and the output hashes are written by
+`prepare_wrds.py` to the run record `docs/wrds_clean_manifest.json` on every run and are
+not copied by hand into this document.
+
+The document contains summary statistics only. The raw file and the cleaned files contain
 row-level licensed WRDS data and are not committed to the repository.
 
 ---
@@ -19,28 +25,30 @@ row-level licensed WRDS data and are not committed to the repository.
 | Input file            | 11,782,633 rows; 6,457 securities; 5,525 companies                 |
 | Analysis segment (R1) | 4,406,728 rows; 2,477 securities; 2,427 companies                  |
 | Trading calendar (R3) | 2,870 weekdays − 91 non-trading days = 2,779 trading days          |
-| Rules                 | 3 foundations (F1–F3) and 14 rules (R1–R14)                        |
+| Rules                 | 4 foundations (F1–F4) and 14 rules (R1–R14)                        |
 | Source SHA-256        | `63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f8` |
+| Run record            | `docs/wrds_clean_manifest.json`, written by `prepare_wrds.py`      |
 
-| Rule | Content                                                       | Evidence                     |
-|------|---------------------------------------------------------------|------------------------------|
-| F1   | Security key `sid = gvkey + "_" + iid`                        | Audit report                 |
-| F2   | Total-return index `tri = prccd / ajexdi * trfd`              | Audit report, `check_r10.py` |
-| F3   | Source file fixed by SHA-256                                  | Audit report                 |
-| R1   | Keep ordinary shares in GBP with a positive price             | Audit report, `check_r10.py` |
-| R2   | Returns across a currency change are missing                  | Audit report                 |
-| R3   | Fixed trading calendar of 2,779 days                          | Audit report                 |
-| R4   | Stuck adjustments: price missing until the price next moves   | Audit report                 |
-| R5   | Returns on suspect adjustment events are set to zero          | Audit report                 |
-| R6   | Manual exception list                                         | Audit report, manual review  |
-| R7   | 10p price floor for eligibility                               | Audit report                 |
-| R8   | Other extreme returns above the floor are genuine             | Audit report                 |
-| R9   | Tradability rule, with a special rule for the 2017 volume gap | Audit report                 |
-| R10  | One line per company per day; switch-day returns missing      | Audit report, `check_r10.py` |
-| R11  | Exclude funds                                                 | Audit report, manual review  |
-| R12  | Keep UK and Crown Dependency incorporations                   | Audit report                 |
-| R13  | Settle exits at the last price                                | Audit report                 |
-| R14  | No separate rule for long intervals; no filling               | Audit report                 |
+| Rule | Content                                                                            | Evidence                     |
+|------|------------------------------------------------------------------------------------|------------------------------|
+| F1   | Security key `sid = gvkey + "_" + iid`                                             | Audit report                 |
+| F2   | Total-return index `tri = prccd / ajexdi * trfd`                                   | Audit report, `check_r10.py` |
+| F3   | Source file fixed by SHA-256                                                       | Audit report                 |
+| F4   | Output series: `close` is the cleaned level, `ret_adj` the observed one-day return | Construction, output checks  |
+| R1   | Keep ordinary shares in GBP with a positive price                                  | Audit report, `check_r10.py` |
+| R2   | Returns across a currency change are missing                                       | Audit report                 |
+| R3   | Fixed trading calendar of 2,779 days                                               | Audit report                 |
+| R4   | Stuck adjustments: price missing until the price next moves                        | Audit report                 |
+| R5   | Suspect adjustment events: level corrected, daily return missing                   | Audit report, manual review  |
+| R6   | Manual exception list                                                              | Audit report, manual review  |
+| R7   | 10p price floor for eligibility (engine)                                           | Audit report                 |
+| R8   | Other extreme returns above the floor are genuine                                  | Audit report                 |
+| R9   | Tradability: valid price and volume; rule for the 2017 volume gap                  | Audit report                 |
+| R10  | One line per company per day; switch-day returns missing                           | Audit report, `check_r10.py` |
+| R11  | Exclude funds                                                                      | Audit report, manual review  |
+| R12  | Keep UK and Crown Dependency incorporations                                        | Audit report                 |
+| R13  | Settle exits at the last price (engine)                                            | Audit report                 |
+| R14  | Returns across missing trading days are missing                                    | Audit report                 |
 
 ---
 
@@ -59,29 +67,29 @@ row-level licensed WRDS data and are not committed to the repository.
 
 ### 1.2 Fields
 
-| Field      | Table     | Meaning                        | Used by                 |
-|------------|-----------|--------------------------------|-------------------------|
-| `gvkey`    | g_secd    | Company key                    | F1                      |
-| `iid`      | g_secd    | Issue ID within company        | F1                      |
-| `datadate` | g_secd    | Date                           | All rules               |
-| `conm`     | g_secd    | Company name                   | Manual review only      |
-| `prccd`    | g_secd    | Close price                    | F2, R1, execution price |
-| `prcod`    | g_secd    | Open price                     | Not used (not audited)  |
-| `ajexdi`   | g_secd    | Cumulative adjustment factor   | F2, R4, R5              |
-| `trfd`     | g_secd    | Cumulative total-return factor | F2, R4                  |
-| `cshtrd`   | g_secd    | Trading volume (shares)        | R3, R9                  |
-| `cshoc`    | g_secd    | Shares outstanding             | R10                     |
-| `curcdd`   | g_secd    | Currency code                  | R1, R2                  |
-| `tpci`     | g_secd    | Issue type code                | R1                      |
-| `exchg`    | g_secd    | Exchange code                  | Download filter         |
-| `secstat`  | g_secd    | Security status                | Inspection only         |
-| `prcstd`   | g_secd    | Price status code              | Not used                |
-| `prirow`   | g_company | Primary issue ID               | R10                     |
-| `sic`      | g_company | SIC code                       | R11                     |
-| `gsubind`  | g_company | GICS sub-industry              | Inspection only         |
-| `fic`      | g_company | Country of incorporation       | R12                     |
-| `dldte`    | g_company | Date the company was deleted   | R13                     |
-| `dlrsn`    | g_company | Reason for deletion            | R13                     |
+| Field      | Table     | Meaning                        | Used by                              |
+|------------|-----------|--------------------------------|--------------------------------------|
+| `gvkey`    | g_secd    | Company key                    | F1                                   |
+| `iid`      | g_secd    | Issue ID within company        | F1                                   |
+| `datadate` | g_secd    | Date                           | All rules                            |
+| `conm`     | g_secd    | Company name                   | Manual review; company table         |
+| `prccd`    | g_secd    | Close price                    | F2, R1, `raw_close`, execution price |
+| `prcod`    | g_secd    | Open price                     | Not used (not audited)               |
+| `ajexdi`   | g_secd    | Cumulative adjustment factor   | F2, R4, R5                           |
+| `trfd`     | g_secd    | Cumulative total-return factor | F2, R4                               |
+| `cshtrd`   | g_secd    | Trading volume (shares)        | R3, R9, `dollar_volume`              |
+| `cshoc`    | g_secd    | Shares outstanding             | R10, `market_cap`                    |
+| `curcdd`   | g_secd    | Currency code                  | R1, R2                               |
+| `tpci`     | g_secd    | Issue type code                | R1                                   |
+| `exchg`    | g_secd    | Exchange code                  | Download filter                      |
+| `secstat`  | g_secd    | Security status                | Inspection only                      |
+| `prcstd`   | g_secd    | Price status code              | Not used                             |
+| `prirow`   | g_company | Primary issue ID               | R10                                  |
+| `sic`      | g_company | SIC code                       | R11, company table                   |
+| `gsubind`  | g_company | GICS sub-industry              | Inspection only                      |
+| `fic`      | g_company | Country of incorporation       | R12, company table                   |
+| `dldte`    | g_company | Date the company was deleted   | R13, company table                   |
+| `dlrsn`    | g_company | Reason for deletion            | R13, company table                   |
 
 ### 1.3 Boundaries
 
@@ -97,26 +105,34 @@ row-level licensed WRDS data and are not committed to the repository.
 
 ## 2. Evidence base
 
-| Source         | Description                                                                                                                                                                       |
-|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Audit report   | `data_test.py` → `data_audit_report.txt`, generated 2026-10-10 16:23 UTC; Python 3.12.14, pandas 3.0.2, NumPy 2.4.4; reads every input row; records the SHA-256 of the input file |
-| `check_r10.py` | Read-only check of R10 cases 5 and 6a, line switches and factor differences between lines; run 2026-10-10 on the same file                                                        |
+| Source         | Description                                                                                                                                                                                   |
+|----------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Audit report   | `data_test.py` → `data_audit_report.txt`, generated 2026-10-10 16:23 UTC; Python 3.12.14, pandas 3.0.2, NumPy 2.4.4; reads every input row; records the SHA-256 of the input file             |
+| `check_r10.py` | Read-only check of R10 cases 5 and 6a, line switches and factor differences between lines; run 2026-10-10 on the same file                                                                    |
+| Manual review  | The cases named in R5, R6 and R11, checked by hand against the raw rows                                                                                                                       |
+| Run record     | `prepare_wrds.py` → `docs/wrds_clean_manifest.json`: rows changed by each step, review lines, parameters, software versions, SHA-256 of the input and of every output; rewritten on every run |
 
-Every number in this document comes from these two outputs. `prepare_wrds.py` prints the
-number of rows each rule actually changes.
+The audit numbers in Sections 0–5 come from the audit report and `check_r10.py` and
+describe the raw file or the R1 segment. The run record gives the rows each step changes
+in the cleaned sample. The two differ where an earlier step removes or changes rows first:
+for example, the audit report has 56 R5 candidates and the run 47, because R4 runs before
+R5 (R5, Scale). Both numbers are correct for their stage.
 
 ---
 
 ## 3. Engine conventions assumed by the rules
 
-| Convention      | Value                                                        |
-|-----------------|--------------------------------------------------------------|
-| Execution price | `prccd` (close), traded at t+1 after the signal date         |
-| Rebalance       | Month-end                                                    |
-| Missing values  | Never filled; a missing price or return stays missing        |
-| Look-ahead      | None; every decision at t uses data up to t                  |
-| Holdout         | Starts 2022-01-01 (`HOLDOUT_START`)                          |
-| Factor windows  | Momentum 252/21, reversal 21, low volatility 60 trading days |
+| Convention      | Value                                                                                             |
+|-----------------|---------------------------------------------------------------------------------------------------|
+| Execution price | `prccd` (close), traded at t+1 after the signal date                                              |
+| Rebalance       | Month-end                                                                                         |
+| Missing values  | Never filled; a missing price or return stays missing                                             |
+| Look-ahead      | None; every decision at t uses data up to t                                                       |
+| Holdout         | Starts 2022-01-01 (`HOLDOUT_START`)                                                               |
+| Factor windows  | Momentum 252/21, reversal 21, low volatility 60 trading days                                      |
+| Calendar        | Panels are indexed by the 2,779 trading days; a company-day without a row is missing              |
+| Returns         | `close` over the previous trading day's `close`, without filling (`pct_change(fill_method=None)`) |
+| Price floor     | Tested on `raw_close`, not on the total-return level `close`                                      |
 
 ---
 
@@ -138,9 +154,11 @@ number of rows each rule actually changes.
 
 ### F2 Total-return index
 
-**Rule.** `tri = prccd / ajexdi * trfd`. The adjusted return is
-`ret_adj = tri / prev_tri − 1`, where `prev_tri` is the previous observation of the same
-line.
+**Rule.** `tri = prccd / ajexdi * trfd`, valid only when `prccd`, `ajexdi` and `trfd` are
+all positive. The within-line return is `ret_adj = tri / prev_tri − 1`, where `prev_tri`
+is the previous observation of the same line, and `ret_raw = prccd / prev_prccd − 1` is
+the raw price change. These are the returns the rules work on. The `ret_adj` in the output
+is the cleaned, observed one-day return defined in F4.
 
 **Assumptions.**
 
@@ -161,6 +179,9 @@ line.
   demerger (R10).
 - The full file has 1,648 `ajexdi` changes and 44,539 `trfd` changes. The cases where a
   factor is wrong are handled by R4 and R5.
+- Requiring each factor to be positive, not only their ratio, keeps two wrong-signed
+  factors from producing a valid-looking index. The run record reports the rows that fail
+  the test.
 
 ### F3 Source integrity
 
@@ -178,6 +199,68 @@ it differs from `63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f
 - The converse does not hold: the gzip header contains a timestamp, so a re-download or
   recompression of identical data produces a different hash. In that case the audit must
   be run again and this document updated before the new hash is accepted.
+
+### F4 Output series
+
+**Rule.** After R10 each company has one row per observed trading day. Two series are
+built from it.
+
+- `close` is a total-return level, `tri × c`, where `c` is constant within a company
+  except on two kinds of day. On a day changed by R5, `c` changes so that the level moves
+  by the cleaned return instead of the index move. On an R10 switch day, `c` puts the new
+  line on the old line's last level. On every other day, including across missing returns
+  (R2, R4, R6, R14), the level follows `tri`. Where the price is missing (R4, R6), `close`
+  is missing.
+- `ret_adj` is the observed one-day return: the within-line return of the chosen line when
+  the previous row of the company is on the previous trading day and R5 did not change the
+  return. It is missing on R2, R5 and R10 switch days, after a missing price (R4, R6), and
+  across missing trading days (R14).
+- `close` is also hidden on a day whose `ret_adj` is missing when the previous trading day
+  has a level, so that no ratio of consecutive `close` values gives a removed return.
+
+The output check requires that wherever two consecutive trading days both have `close`,
+`close_t / close_{t−1} − 1 = ret_adj_t` within 1e-9.
+
+**Assumptions.**
+
+- A-F4.1: Signals measured over a window (momentum, reversal) need a level whose ratio
+  over the window equals the cleaned cumulative return, including the corrections made by
+  R5.
+- A-F4.2: Daily statistics (volatility) and daily labels need observed one-day returns
+  only. A move that was corrected, or that spans several trading days, must not appear as
+  one day's return.
+
+**Why the assumptions hold.**
+
+- A-F4.1: Chaining the cleaned returns is the only way to carry an R5 correction into
+  every later level; `tri × c` is the same chain written without a loop.
+- A-F4.2: R5 replaces a return by 0 or by a two-day return. Neither is the return of that
+  day, which is unknown, so the day's return is missing while the level keeps the
+  correction. The same holds for a switch day (A10.5) and for a return across a gap (R14).
+- How each event enters the output:
+
+| Event                    | Level                                                             | `close` on the day     | `ret_adj`                                             |
+|--------------------------|-------------------------------------------------------------------|------------------------|-------------------------------------------------------|
+| R2 currency change       | Follows `tri`                                                     | Hidden                 | Missing                                               |
+| R4 stuck price           | Missing during the run; follows `tri` across it                   | Missing during the run | Missing during the run and on the day the price moves |
+| R5 unpaired candidate    | Flat on the day (move treated as 0)                               | Hidden                 | Missing                                               |
+| R5 pair                  | Flat on the earlier day; the later day carries the two-day return | Hidden                 | Missing on both days                                  |
+| R6 bad print             | Missing on the day; follows `tri` across it                       | Missing                | Missing on the day and the next day                   |
+| R10 line switch          | Continuous: the new line starts at the old line's level           | Hidden                 | Missing                                               |
+| R14 missing trading days | Follows `tri` across the gap                                      | Present                | Missing                                               |
+
+- "Hidden" applies where the previous trading day has a level (rule above). The level
+  itself continues, so `close` on later days includes the move.
+- One level series cannot have a missing return on one day and a valid return on the next
+  unless the first day's `close` is hidden; the valid `ret_adj` of the following day then
+  cannot be computed from `close`. The run record reports how many such returns there are
+  ("Engine sees ..."). They are the only difference between the returns the engine
+  computes and `ret_adj`.
+- Use: window signals and multi-day labels from `close`, which includes every correction;
+  daily return statistics from `ret_adj`, or from `close` on consecutive trading days (the
+  same values where both exist); the price floor from `raw_close`. A multi-day label
+  compounded from `ret_adj` is missing whenever its window contains one of the events
+  above.
 
 ---
 
@@ -293,18 +376,32 @@ changes. R4 is applied before R5.
 ### R5 Suspect adjustment events
 
 **Rule.** A candidate is a segment row with a valid return where `ajexdi` changes,
-`|ret_adj| > 30%`, and `aj_ratio < 0.8` or `aj_ratio > 1.25`. If the candidate and an
-adjacent observation of the same line together give a combined return within ±20%, both
-returns are set to 0. Otherwise only the candidate's return is set to 0. The total-return
-index is then rebuilt from the cleaned returns. The two events in R6 are exempt.
+`|ret_adj| > 30%`, and `aj_ratio < 0.8` or `aj_ratio > 1.25`. The two events in R6 are
+exempt.
+
+- If the candidate and the neighbouring return of the same line (the previous one first,
+  otherwise the next) give a two-day return within ±20%, the pair keeps its two-day
+  return: the earlier day's return becomes 0 and the later day's return becomes the
+  two-day return.
+- Otherwise the candidate's return becomes 0.
+- The changed returns are used only to build the level (F4). In the output, the daily
+  return of every day changed by R5 is missing.
+- The code stops for a manual review if a candidate would pair with an exempt return, or
+  if two pairs share a day.
+- Unpaired candidates that a return 2 to 10 rows away would offset are listed in the run
+  record for manual review. They are never paired automatically.
 
 **Assumptions.**
 
 - A5.1: A large adjusted return on a day when the adjustment factor moves far from 1 comes
   from a wrong or mistimed factor, not from a real price move.
-- A5.2: When the candidate and an adjacent return offset each other, the factor was applied
-  one day early or late, and both returns are artefacts.
-- A5.3: Setting the return to 0 is closer to the true return than keeping it.
+- A5.2: When the candidate and a neighbouring return offset each other, the factor was
+  applied one day early or late. The two-day return is correct; its split between the two
+  days is not.
+- A5.3: For an unpaired candidate, a level move of 0 is closer to the truth than the
+  misadjusted move.
+- A5.4: A mismatch between factor and price that lasts more than one day is either a stuck
+  price (R4) or appears in the manual review list.
 
 **Why the assumptions hold.**
 
@@ -326,22 +423,46 @@ index is then rebuilt from the cleaned returns. The two events in R6 are exempt.
   change.
 - A5.1: The `aj_ratio` band excludes small factor changes, where a large return is more
   likely to be a real price move.
-- A5.2: An offset within ±20% over two days means the price level is essentially
-  unchanged once both days are combined. Zeroing only one leg would leave the other as a
-  false jump. 3 of the 56 candidates can be paired with the previous observation, 0 with
-  the next. Example: Serinus (`107272_03W`) on 2022-05-17, `ajexdi` records a 10-to-1
-  consolidation (`aj_ratio` 0.1) while the price moves +2.4%; the previous day's return
-  offsets it, so the price had already been consolidated one day earlier.
+- A5.2: An offset within ±20% over two days means the price level is roughly unchanged
+  once both days are combined, and keeping the two-day return preserves the combined move
+  exactly; zeroing only one leg would leave the other as a false jump. 3 of the 56
+  candidates can be paired with the previous observation, 0 with the next. Example:
+  Serinus (`107272_03W`) on 2022-05-17, `ajexdi` records a 10-to-1 consolidation
+  (`aj_ratio` 0.1) while the price moves +2.4%; the previous day's return offsets it, so
+  the price had already been consolidated one day earlier.
+- A5.2: In one pair the candidate's previous observation is two trading days earlier.
+  `313481_01W` has no row on 2014-07-08; on 2014-07-09 the price is 3.50 after a 1000-to-1
+  consolidation. In pre-consolidation terms the price runs 0.0030 (07-04), 0.0075 (07-07),
+  0.0035 (07-09) and 0.0030 (07-10), so 0.0075 is out of line with both sides. The pair
+  keeps +16.7% from 07-04 to 07-09, consistent with the surrounding prices; treating the
+  candidate alone would keep the +150% of 07-07 in the level. Because the daily returns of
+  both days are missing (F4), the move across the missing day never appears as one day's
+  return.
 - A5.3: A wrong factor shifts the total-return index for every later date, so momentum and
-  volatility would read it as a signal. Zeroing the return keeps the index level correct
+  volatility would read it as a signal. Zeroing the move keeps the index level correct
   before and after the event. The error introduced is the true ex-date return, which for a
-  rights issue or consolidation is usually small; the error from keeping the return is
-  the full misadjustment (about +92.6% for Capita). The true return cannot be computed
-  because the terms of the corporate action are not in the data.
+  rights issue or consolidation is usually small; the error from keeping the return is the
+  full misadjustment (about +92.6% for Capita). The true return cannot be computed because
+  the terms of the corporate action are not in the data, so the day's return is missing
+  rather than 0 (F4).
+- A5.4: Stuck prices are covered by R4 whatever their length (for example `298097_02W`, 33
+  trading days). For other delays the run record lists every unpaired candidate that a
+  return 2 to 10 rows away would offset. Both cases listed were reviewed by hand, and
+  neither is a delayed adjustment:
+  - `282379_01W` 2022-01-27: a stock trading at 0.35p to 0.59p with daily moves of 10% to
+    50%. The offsetting return is an ordinary +50% two days earlier, and 2022-01-27 is the
+    company's last row.
+  - `314757_01W` 2016-03-21: incorporated in the Cayman Islands and excluded by R12; a 2p
+    to 3p stock suspended from 2016-01-01 to 2016-03-21. The offsetting return is a −37.5%
+    move in April.
+- A5.4: A wider automatic window would pair such cases by chance, so the window is used
+  only for review.
 
-**Scale.** 56 raw candidates in 53 securities; 21 with a previous price of at least 10p;
-8 overlap with R4; 3 pairable. The final number of changed returns is printed by
-`prepare_wrds.py`.
+**Scale.** 56 raw candidates in 53 securities; 21 with a previous price of at least 10p; 8
+overlap with R4; 3 pairable. After R4, 47 candidates in 45 securities remain: the 8 R4
+events are gone, and so is `298097_02W` on 2019-08-27, the day the stuck price of an R4
+event moves, whose return is missing after R4. The run record gives the returns changed in
+the final sample.
 
 ### R6 Manual exceptions
 
@@ -385,8 +506,8 @@ index is then rebuilt from the cleaned returns. The two events in R6 are exempt.
 
 ### R7 Price floor
 
-**Rule.** A security is not eligible at a rebalance date if its previous close is below
-10p. 20p is the robustness check.
+**Rule.** A security is not eligible at a rebalance date if its previous raw close
+(`raw_close`) is below 10p. 20p is the robustness check. The engine applies the floor.
 
 **Assumption.**
 
@@ -439,16 +560,18 @@ R6 exceptions.
 
 ### R9 Tradability and the 2017 volume gap
 
-**Rule.** A security is tradable on a day if `cshtrd > 0`. Inside
-`VOLUME_GAP = 2017-06-19 to 2017-10-13` (inclusive), it is tradable if `cshtrd > 0` or
-the close changed from the previous trading day.
+**Rule.** A row is tradable if it has a valid price and `cshtrd > 0`. Inside `VOLUME_GAP =
+2017-06-19 to 2017-10-13` (inclusive), a row with a valid price is also tradable if the
+raw price changed from the previous trading day. A row without a valid price (R4, R6) is
+never tradable.
 
 **Assumptions.**
 
 - A9.1: Outside the gap, missing volume means no trading.
 - A9.2: Inside the gap, missing volume is a vendor coverage problem, not an absence of
   trading.
-- A9.3: Inside the gap, a price change shows that the security traded.
+- A9.3: Inside the gap, a one-day price change shows that the security traded.
+- A9.4: A row without a valid price cannot be traded at a known price.
 
 **Why the assumptions hold.**
 
@@ -466,6 +589,10 @@ the close changed from the previous trading day.
 - A9.3: Inside the gap, rows with missing volume and a changed price are 17.80%, against
   0.94% outside: many prices moved without recorded volume. A price change can also come
   from a corporate action, so it is only proxy evidence of trading.
+- A9.3: The change must be a one-day change. A change measured across missing trading days
+  does not show that trading happened on this day, so `ret_raw` follows the one-day test
+  of R14.
+- A9.4: R4 and R6 rows have no usable price, so a trade there could not be valued.
 - The rule is conservative. Rows with positive volume are 50.15% in the gap against 84.65%
   outside, and rows with missing volume and an unchanged price are 32.03% against 14.41%;
   part of the excess probably traded but is still treated as not tradable.
@@ -480,11 +607,12 @@ tradable.
 
 1. if exactly one line is observed, use it;
 2. otherwise use the primary line (`iid = prirow`) if it is observed;
-3. otherwise use the line with the largest valid market value
-   (`prccd × cshoc`, both positive and the product finite);
+3. otherwise use the line with the largest valid market value (`prccd × cshoc` after R4
+   and R6, both positive and the product finite);
 4. if lines tie, use the smallest `iid`;
 5. if the line chosen differs from the line chosen on the company's previous observed day,
-   the company's return on that day is missing.
+   the company's return on that day is missing and the level continues from the old line
+   (F4).
 
 The code raises an error if a company-day has more than one primary line (case 3), a tie
 when only some market values are valid (case 6b), or no valid market value (case 7).
@@ -539,6 +667,8 @@ when only some market values are valid (case 6b), or no valid market value (case
   within-line return of +202.5% is measured from the unselected bad print. Setting
   switch-day returns to missing removes such returns; every remaining return is the ratio
   of two consecutive prices of the same chosen line. The cost is 52 returns.
+- These counts are for the segment. R10 runs after R11 and R12 (Section 6), so fewer
+  switches remain in the final sample; the run record gives the number.
 
 ### R11 Funds
 
@@ -597,13 +727,16 @@ when only some market values are valid (case 6b), or no valid market value (case
   one value within a company.
 - Jersey, Guernsey and the Isle of Man are common holding-company domiciles for
   London-listed firms.
+- In the run, R12 removes fewer securities than the 324 outside the four codes, because
+  some of them are funds already removed by R11 and R6.
 - The filter is a judgement, so the robustness check removes it.
 
 ### R13 Delisting
 
 **Rule.** A security that leaves the sample is settled at its last price. Robustness
 check: an extra −30% return for exits with `dlrsn` other than 01 (acquisition or merger),
-04 (reverse acquisition) and 09 (now private).
+04 (reverse acquisition) and 09 (now private). The engine applies the rule;
+`prepare_wrds.py` writes the exit data to `data/wrds_companies.csv` (Section 6.2).
 
 **Assumptions.**
 
@@ -612,8 +745,9 @@ check: an extra −30% return for exits with `dlrsn` other than 01 (acquisition 
 
 **Why the assumptions hold.**
 
-- Exits matter: 1,157 of 2,427 segment companies have their last price before
-  2024-12-31. Keeping them avoids survivorship bias.
+- Exits matter: 1,157 of 2,427 segment companies have their last price before 2024-12-31.
+  Keeping them avoids survivorship bias. The run record gives the number for the final
+  universe.
 - A13.1: `dldte` relative to the last price date, for the 1,157 companies:
 
 | `dldte`                 | Companies |
@@ -643,8 +777,15 @@ check: an extra −30% return for exits with `dlrsn` other than 01 (acquisition 
 
 ### R14 Long intervals and stale prices
 
-**Rule.** No separate rule. After R3, each line is reindexed onto the 2,779-day calendar
-without filling, so a return across a missing day is missing.
+**Rule.** A return is a one-day return only if the previous row of the same company is on
+the previous trading day. Otherwise `ret_adj` is missing in the output, and the level
+keeps the move across the gap (F4). `ret_raw`, which R9 uses, passes the same test at line
+level. R14 is applied to `ret_adj` after R5, so that R5 still corrects a misadjusted
+factor across a gap in the level.
+
+The engine adds a second guard: its panels are indexed by all 2,779 trading days and
+returns are computed without filling, so a return across a missing day is missing there as
+well.
 
 **Assumptions.**
 
@@ -652,6 +793,8 @@ without filling, so a return across a missing day is missing.
   across them does not matter.
 - A14.2: Runs of unchanged prices reflect real non-trading of illiquid stocks, not data
   errors.
+- A14.3: A price observed after a gap is a valid price; only the day the move happened is
+  unknown.
 
 **Why the assumptions hold.**
 
@@ -679,39 +822,86 @@ without filling, so a return across a missing day is missing.
 
 - Long runs are rare, and the median return after a run stays within −5%, which fits
   illiquid stocks that trade occasionally rather than prices that were never updated.
+- A14.3: Keeping the move in the level leaves window signals correct across the gap;
+  dropping it would understate every later level by the move.
 - The engine must value positions held across a missing day; that is an engine rule, not
   a data rule. Stale prices lower measured volatility and so bias the low-volatility
   factor toward illiquid stocks (Section 8).
 
 ---
 
-## 6. Order of application in `prepare_wrds.py`
+## 6. Implementation in `prepare_wrds.py`
 
-1. F3: check the SHA-256.
-2. R2: compute the currency-change mask on the unfiltered data.
-3. R1: analysis segment.
-4. Price-level fixes: R4, then R6 (bad-print prices).
-5. Compute returns within each line (F2).
-6. R2: apply the currency mask.
-7. R5 (with the R6 exemptions).
-8. Rebuild the total-return index from the cleaned returns.
-9. R10–R12 and R6 fund exclusions: universe; switch-day returns missing (R10).
-10. R3 and R14: reindex onto the calendar without filling.
-11. R9: tradability flags.
+### 6.1 Order of application
 
-R7 and R13 are applied by the engine at rebalance and exit. `prepare_wrds.py` prints the
-number of rows affected by each rule.
+The steps run in this order, which is also the order of the step log in the run record.
+
+| Step | Function                                                                | Rules                                          |
+|-----:|-------------------------------------------------------------------------|------------------------------------------------|
+|    1 | `check_source`                                                          | F3                                             |
+|    2 | `load`                                                                  | F1                                             |
+|    3 | `count_currency_breaks`                                                 | R2: changes counted on the unfiltered file     |
+|    4 | `keep_segment`                                                          | R1                                             |
+|    5 | `keep_trading_days`                                                     | R3                                             |
+|    6 | `mark_currency_breaks`                                                  | R2: rows whose return crosses a change         |
+|    7 | `fix_stuck_adjustments`                                                 | R4                                             |
+|    8 | `remove_bad_prints`                                                     | R6: bad prints                                 |
+|    9 | `line_returns`                                                          | F2; R2 applied; R14 for `ret_raw`              |
+|   10 | `clean_adjustments`                                                     | R5; R6 exemptions                              |
+|   11 | `select_universe`                                                       | R11; R6 fund list; R12                         |
+|   12 | `select_lines`                                                          | R10                                            |
+|   13 | `build_close`                                                           | F4; R14 for `ret_adj`                          |
+|   14 | `add_trading_fields`                                                    | R9; `raw_close`, `dollar_volume`, `market_cap` |
+|   15 | `write_output`, `write_company_table`, `write_events`, `write_manifest` | Output checks and files (6.2)                  |
+
+- R3 runs before the price fixes, so every later rule sees trading days only. R2 is
+  counted before R1 and R3, so that a change on a removed row is not lost.
+- R11 and R12 remove whole securities before R10, so R10 chooses only among lines that
+  stay in the universe. Returns are computed before these filters; removing whole
+  securities does not cut any remaining return.
+- R7 and R13 are applied by the engine at rebalance and exit. R8 changes no data.
+
+### 6.2 Output files
+
+| File                            | Content                                                                                                     | Committed |
+|---------------------------------|-------------------------------------------------------------------------------------------------------------|-----------|
+| `data/wrds_clean.csv.gz`        | One row per company and trading day (fields below)                                                          | No        |
+| `data/wrds_companies.csv`       | One row per company: `conm`, `sic`, `fic`, `dlrsn`, `dldte`, first and last date                            | No        |
+| `data/wrds_clean_events.csv`    | Every row-level change by R2, R4, R5, R6, R10 and R14: rule, `sid`, date, field, old and new value          | No        |
+| `docs/wrds_clean_manifest.json` | Run record: step log, review lines, parameters, versions, SHA-256 of the input and of the three files above | Yes       |
+
+Fields of `data/wrds_clean.csv.gz`:
+
+| Field           | Unit        | Definition                                                                      |
+|-----------------|-------------|---------------------------------------------------------------------------------|
+| `date`          | —           | Trading day (R3)                                                                |
+| `symbol`        | —           | `gvkey`, 6 digits                                                               |
+| `close`         | Index level | Total-return level (F4); only ratios are meaningful                             |
+| `raw_close`     | GBP         | `prccd` of the chosen line after R4 and R6                                      |
+| `dollar_volume` | GBP         | `prccd × cshtrd`; the name follows the engine interface, the currency is GBP    |
+| `is_tradable`   | Boolean     | R9                                                                              |
+| `ret_adj`       | Return      | Observed one-day return (F4)                                                    |
+| `market_cap`    | GBP         | `prccd × cshoc` of the chosen line, not the total over all lines of the company |
+
+The engine reads the first six fields; `ret_adj` and `market_cap` are for other projects
+that use the same data. Before writing, `prepare_wrds.py` checks one row per company and
+day, 6-digit symbols, the full trading calendar, positive `close`, `raw_close` and
+`market_cap` after conversion to float32, non-negative `dollar_volume`, boolean
+`is_tradable`, no tradable row without a price, finite one-day `ret_adj` above −100%, and
+the identity between `close` and `ret_adj` (F4). The same input gives byte-identical
+files.
 
 ---
 
 ## 7. Robustness checks
 
-| Rule | Baseline                                      | Alternative                                  |
-|------|-----------------------------------------------|----------------------------------------------|
-| R7   | 10p floor                                     | 20p floor                                    |
-| R9   | Inside the gap: `cshtrd > 0` or price changed | Inside the gap: every row with a valid price |
-| R12  | GBR, JEY, GGY, IMN                            | No country filter                            |
-| R13  | Last price                                    | Extra −30% for exits other than 01, 04, 09   |
+| Rule | Baseline                                      | Alternative                                        |
+|------|-----------------------------------------------|----------------------------------------------------|
+| R5   | Corrections as in R5                          | No R5 (the original returns are in the event file) |
+| R7   | 10p floor                                     | 20p floor                                          |
+| R9   | Inside the gap: `cshtrd > 0` or price changed | Inside the gap: every row with a valid price       |
+| R12  | GBR, JEY, GGY, IMN                            | No country filter                                  |
+| R13  | Last price                                    | Extra −30% for exits other than 01, 04, 09         |
 
 ---
 
@@ -721,7 +911,22 @@ number of rows affected by each rule.
 - Delisting information is available only at company level.
 - `cshtrd` never records zero, so no-trade and no-data cannot be told apart; inside the
   2017 gap this is worse.
-- R5 approximates the true ex-date return as 0.
+- R5 sets the level move of an unpaired candidate to 0 and keeps only the two-day move of
+  a pair. The true returns of these days are unknown; they are missing in `ret_adj`, but
+  the level depends on the assumption.
+- Cleaning uses information from after the date. R5 changes a day's return using the
+  neighbouring day (all three pairs in this file use the previous return, so day t−1 is
+  changed using day t); R4 needs the day the price next moves; the lists in R6 come from
+  ex-post review. The cleaned data describe what happened, not what was known on each day.
+- Across an R4 gap the level follows `tri`. For `298097_02W` the factor moves on
+  2019-07-11 and again on 2019-08-27, when the stuck price finally moves, and the level
+  falls about 76% across the gap. If the two factor moves record the same consolidation
+  twice, the fall is false; the data cannot tell.
+- Mismatches between factor and price longer than one day are not corrected automatically;
+  they are listed for manual review (R5).
+- A valid `ret_adj` on the day after a hidden `close` cannot be computed from `close`
+  (F4).
+- `market_cap` is the value of the chosen line only.
 - The 91 non-trading days were matched against the data and known holidays; they were not
   checked against an official exchange calendar.
 - `prcod` was not audited and must not be used as an execution price without its own audit.
@@ -744,7 +949,12 @@ number of rows affected by each rule.
 - The raw file is kept locally as `data/wrds_uk_prices.csv.gz`; `data/` is listed in
   `.gitignore`. `prepare_wrds.py` refuses to run unless the file's SHA-256 matches the
   value in Section 0.
-- Only this document and the SHA-256 are committed.
+- `prepare_wrds.py` writes the three data files of Section 6.2 to `data/` and the run
+  record to `docs/wrds_clean_manifest.json`. The run record contains counts, parameters
+  and hashes only; it is committed and must not be edited by hand.
+- The same input gives byte-identical outputs, so a rebuild can be checked against the
+  SHA-256 values in the run record.
+- Committed: this document, the run record and the SHA-256 of the input.
 
 ---
 

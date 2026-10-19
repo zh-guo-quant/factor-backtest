@@ -29,6 +29,7 @@ RAW_PRICE_FILE = RAW_FILES[SOURCE]
 # --- RWDS source (read only by prepare_wrds.py) ---
 WRDS_RAW_FILE = DATA_DIR / "wrds_uk_prices.csv.gz"
 WRDS_SHA256 = "63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f8"
+WRDS_COMPANY_FILE = DATA_DIR / "wrds_companies.csv"     #written by prepare_wrds.py
 
 # --- Universe ---
 PRICE_FLOOR = 0.10

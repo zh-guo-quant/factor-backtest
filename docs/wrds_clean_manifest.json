@@ -1,0 +1,274 @@
+{
+  "input": {
+    "file": "wrds_uk_prices.csv.gz",
+    "sha256": "63d1e8186032380c59bc7a2c67bc054d08dd190c08ad4874133c24768ec0c2f8"
+  },
+  "outputs": {
+    "wrds_clean.csv.gz": "db8a6c40575c24edae9bc8fcfbffefc82c88d4d792d7b081692ba47a5c772cde",
+    "wrds_companies.csv": "932c01459af6fc785ae20bc5d724ad9c8a408fad2dc6f29a30b2768ef0c8ddce",
+    "wrds_clean_events.csv": "5c79b871a475d7212066cc30bd7f547a03c080c05ad9be8643ee8730232bd99c"
+  },
+  "versions": {
+    "python": "3.12.14",
+    "pandas": "3.0.6",
+    "numpy": "2.4.4"
+  },
+  "parameters": {
+    "R4_FACTOR_MOVE": 0.2,
+    "BAD_PRINTS": [
+      [
+        "284812_02W",
+        "2017-06-16"
+      ],
+      [
+        "204760_01W",
+        "2017-03-27"
+      ]
+    ],
+    "R5_ABS_RET": 0.3,
+    "R5_AJ_RATIO": [
+      0.8,
+      1.25
+    ],
+    "R5_PAIR_TOLERANCE": 0.2,
+    "R5_REVIEW_WINDOW": 10,
+    "R5_EXEMPT": [
+      [
+        "270250_02W",
+        "2018-08-02"
+      ],
+      [
+        "327786_01W",
+        "2022-12-14"
+      ]
+    ],
+    "FUND_SIC": [
+      "6722",
+      "6726"
+    ],
+    "FUND_SIDS": [
+      "334189_01W",
+      "338652_01W",
+      "354688_01W",
+      "360936_01W",
+      "360955_01W",
+      "317049_01W",
+      "318314_01W",
+      "275853_01W",
+      "281799_01W",
+      "282866_01W",
+      "285008_01W",
+      "297720_01W",
+      "313845_01W",
+      "201019_01W",
+      "297187_01W",
+      "298091_01W",
+      "314166_01W",
+      "325198_01W",
+      "328536_01W",
+      "328934_01W"
+    ],
+    "KEEP_FIC": [
+      "GBR",
+      "JEY",
+      "GGY",
+      "IMN"
+    ],
+    "VOLUME_GAP": [
+      "2017-06-19",
+      "2017-10-13"
+    ],
+    "NON_TRADING_DAYS": 91
+  },
+  "log": [
+    {
+      "rule": "F1",
+      "action": "loaded",
+      "rows": 11782633,
+      "sids": 6457
+    },
+    {
+      "rule": "R2",
+      "action": "currency changes in the full file",
+      "rows": 1130,
+      "sids": 276
+    },
+    {
+      "rule": "R1",
+      "action": "rows outside the segment removed",
+      "rows": 7375905,
+      "sids": 4041
+    },
+    {
+      "rule": "R3",
+      "action": "rows on non-trading days removed",
+      "rows": 139470,
+      "sids": 2466
+    },
+    {
+      "rule": "R2",
+      "action": "kept rows whose return crosses a change",
+      "rows": 4,
+      "sids": 4
+    },
+    {
+      "rule": "R4",
+      "action": "stuck adjustment events",
+      "rows": 22,
+      "sids": 22
+    },
+    {
+      "rule": "R4",
+      "action": "price set to missing",
+      "rows": 763,
+      "sids": 22
+    },
+    {
+      "rule": "R6",
+      "action": "bad-print prices set to missing",
+      "rows": 2,
+      "sids": 2
+    },
+    {
+      "rule": "F2",
+      "action": "prices without positive adjustment factors",
+      "rows": 0,
+      "sids": 0
+    },
+    {
+      "rule": "F2",
+      "action": "valid within-line returns",
+      "rows": 4263997,
+      "sids": 2476
+    },
+    {
+      "rule": "R2",
+      "action": "returns set to missing (currency change)",
+      "rows": 4,
+      "sids": 4
+    },
+    {
+      "rule": "R5",
+      "action": "candidates",
+      "rows": 47,
+      "sids": 45
+    },
+    {
+      "rule": "R6",
+      "action": "candidates exempt from R5",
+      "rows": 2,
+      "sids": 2
+    },
+    {
+      "rule": "R5",
+      "action": "unpaired candidate returns set to 0",
+      "rows": 42,
+      "sids": 40
+    },
+    {
+      "rule": "R5",
+      "action": "pairs: two-day return moved to later day",
+      "rows": 3,
+      "sids": 3
+    },
+    {
+      "rule": "R11",
+      "action": "fund sic codes removed",
+      "rows": 192740,
+      "sids": 154
+    },
+    {
+      "rule": "R6",
+      "action": "listed fund securities removed",
+      "rows": 27287,
+      "sids": 20
+    },
+    {
+      "rule": "R12",
+      "action": "incorporated outside kept countries removed",
+      "rows": 471832,
+      "sids": 313
+    },
+    {
+      "rule": "R10",
+      "action": "rows on other lines removed",
+      "rows": 19729,
+      "sids": 30
+    },
+    {
+      "rule": "R10",
+      "action": "switch-day returns set to missing",
+      "rows": 46,
+      "sids": 9
+    },
+    {
+      "rule": "R5",
+      "action": "changed returns carried into close",
+      "rows": 37,
+      "sids": 33
+    },
+    {
+      "rule": "R5",
+      "action": "changed returns: daily return set to missing",
+      "rows": 34,
+      "sids": 31
+    },
+    {
+      "rule": "R14",
+      "action": "returns across missing days set to missing",
+      "rows": 61,
+      "sids": 51
+    },
+    {
+      "rule": "F2",
+      "action": "close missing: no valid price",
+      "rows": 219,
+      "sids": 14
+    },
+    {
+      "rule": "F2",
+      "action": "close missing: return missing",
+      "rows": 74,
+      "sids": 34
+    },
+    {
+      "rule": "R9",
+      "action": "tradable rows",
+      "rows": 3062807,
+      "sids": 1953
+    },
+    {
+      "rule": "R9",
+      "action": "tradable only by price change in volume gap",
+      "rows": 19012,
+      "sids": 840
+    },
+    {
+      "rule": "F1",
+      "action": "rows written",
+      "rows": 3555670,
+      "sids": 1955
+    },
+    {
+      "rule": "F1",
+      "action": "company rows written",
+      "rows": 1955,
+      "sids": 1955
+    },
+    {
+      "rule": "F1",
+      "action": "change events written",
+      "rows": 958,
+      "sids": 127
+    }
+  ],
+  "review": [
+    "R4 stuck runs: 22 events, 763 rows, median 4, max 473 rows",
+    "R5 unpaired candidates offset 2-10 rows away: 2 (282379_01W 2022-01-27, 314757_01W 2016-03-21)",
+    "R10 company-days by cases: 1 3,536,287, 2 18,314, 4 72, 5 997",
+    "R10 line switches: 46 days in 8 companies",
+    "Engine sees 3,553,285 of 3,553,342 valid returns; 57 follow a hidden close",
+    "Output wrds_clean.csv.gz: 66.6 MB, SHA-256 db8a6c40575c24edae9bc8fcfbffefc82c88d4d792d7b081692ba47a5c772cde",
+    "Companies whose last row is before 2024-12-31: 873"
+  ]
+}

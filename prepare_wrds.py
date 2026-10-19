@@ -2,13 +2,15 @@
 # =================================================================================================
 """Build the engine input file for source 'wrds' from the audited WRDS_UK file.
 
-Rules (F1 - F3, R1 - R14) are documented in docs/data_audit_wrds_uk.md.
+Rules (F1 - F4, R1 - R14) are documented in docs/data_audit_wrds_uk.md.
 Every step records how many rows it changed, so the log can be checked against the audit report.
 
 Output: data/wrds_clean.csv.gz, one row per company and trading day:
 date, symbol, close, raw_close, dollar_volume, is_tradable, ret_adj, market_cap."""
 
 import hashlib
+import json
+import platform
 
 import numpy as np
 import pandas as pd
@@ -18,16 +20,19 @@ import config
 RAW_FILE = config.WRDS_RAW_FILE
 EXPECTED_SHA256 = config.WRDS_SHA256
 OUTPUT_FILE = config.RAW_FILES["wrds"]
+COMPANY_FILE = config.WRDS_COMPANY_FILE
+EVENT_FILE = config.DATA_DIR / "wrds_clean_events.csv"
+MANIFEST_FILE = config.ROOT / "docs"/ "wrds_clean_manifest.json"
 
 # Only the columns later steps use; dropping the rest at read time saves memory.
 USE_COLUMNS = [
     "gvkey", "iid", "datadate", "conm", "tpci", "curcdd",
     "prccd", "ajexdi", "trfd", "cshtrd", "cshoc",
-    "prirow", "sic", "fic", "dlrsn",
+    "prirow", "sic", "fic", "dlrsn", "dldte",
 ]
-STRING_COLUMNS = ["gvkey", "iid", "tpci", "curcdd", "prirow", "sic", "fic", "dlrsn"]
-NUMERIC_COLUMNS = ["prccd", "ajexdi", "trfd", "cshtrd", "cshoc"]
-KEY = ["sid", "datadate"]
+STRING_COLUMNS = ["gvkey", "iid", "tpci", "curcdd", "prirow", "sic", "fic", "dlrsn", "dldte",]
+NUMERIC_COLUMNS = ["prccd", "ajexdi", "trfd", "cshtrd", "cshoc",]
+KEY = ["sid", "datadate",]
 
 SAMPLE_START, SAMPLE_END = "2014-01-01", "2024-12-31"
 
@@ -61,11 +66,19 @@ NON_TRADING_DAYS = pd.to_datetime([
 LOG_FORMAT = "{:<5}{:<46}{:>12}{:>10}"
 _LOG = []
 _REVIEW = []
+_EVENTS = []
 
 def log(rule, action, rows, securities):
     """Record one step and print it as a row of log table."""
     _LOG.append((rule, action, int(rows), int(securities)))
     print(LOG_FORMAT.format(rule, action, f"{int(rows):,}", f"{int(securities):,}"))
+
+def record(rule, df, mask, field, before, after):
+    """Keep row-level changes (rule, sid, date, field, old and new value) for the event file."""
+    events = df.loc[mask, ["sid", "datadate"]].assign(rule = rule, field = field)
+    events["before"] = before[mask] if isinstance(before, pd.Series) else before
+    events["after"] = after[mask] if isinstance(after, pd.Series) else after
+    _EVENTS.append(events)
 
 def print_log_header():
     print(LOG_FORMAT.format("rule", "action", "rows", "sids"))
@@ -97,7 +110,14 @@ def load(path = RAW_FILE):
     )
     df.columns = df.columns.str.strip().str.lower()
     for column in NUMERIC_COLUMNS:
-        df[column] = pd.to_numeric(df[column], errors = "coerce")
+        parsed = pd.to_numeric(df[column], errors = "coerce")
+        failed = parsed.isna() & df[column].notna()
+        if failed.any():
+            raise ValueError(
+                f"{column}: {int(failed.sum())} values are not numbers, "
+                f"first {df.loc[failed, column].iloc[0]!r}"
+            )
+        df[column] = parsed
     df["datadate"] = pd.to_datetime(df["datadate"])
     for column in STRING_COLUMNS:
         df[column] = df[column].str.strip()
@@ -138,6 +158,12 @@ def trading_days():
     if len(reference) != 91 or reference.has_duplicates or not reference.isin(weekdays).all():
         raise ValueError("NON_TRADING_DAYS must be 91 unique weekdays inside the sample.")
     return weekdays.difference(reference)
+
+def follows_previous_day(dates, groups):
+    """True where the previous row of the same group is on the previous trading day."""
+    days = trading_days()
+    day_no = dates.map(pd.Series(np.arange(len(days)), index = days))
+    return (day_no - day_no.groupby(groups, sort = False).shift(1)).eq(1)
 
 def keep_trading_days(df):
     """R3: remove rows on non-trading days and weekends; every trading days must remain."""
@@ -210,21 +236,23 @@ def fix_stuck_adjustments(df):
     log("R4", "stuck adjustment events", event.sum(), df.loc[event, "sid"].nunique())
     log("R4", "price set to missing", stuck.sum(), df.loc[stuck, "sid"].nunique())
     summarise_stuck_runs(df, stuck, run)
+    record("R4", df, stuck, "prccd", df["prccd"], np.nan)
     df.loc[stuck, "prccd"] = np.nan
     return df
 
 def remove_bad_prints(df, bad_prints = BAD_PRINTS):
     """R6: set the listed bad-print prices to missing."""
-    affected = set()
+    hits = pd.Series(False, index = df.index)
     for sid, date in bad_prints:
         hit = df["sid"].eq(sid) & df["datadate"].eq(pd.Timestamp(date))
         if hit.sum() != 1:
             raise ValueError(
                 f"R6 bad print {sid} {date}: {int(hit.sum())} matching rows, expected 1"
             )
-        df.loc[hit, "prccd"] = np.nan
-        affected.add(sid)
-    log("R6", "bad-print prices set to missing", len(bad_prints), len(affected))
+        hits |= hit
+    record("R6", df, hits, "prccd", df["prccd"], np.nan)
+    df.loc[hits, "prccd"] = np.nan
+    log("R6", "bad-print prices set to missing", hits.sum(), df.loc[hits, "sid"].nunique())
     return df
 
 # %% Block 5. F2 within-line returns, R2 applied
@@ -237,16 +265,21 @@ def line_returns(df):
     or when it crosses a currency change (R2).
     The first row of a sid has no return.
     tri and ret_adj are used again in Block 9 to build close."""
-    df["tri"] = df["prccd"] / df["ajexdi"] * df["trfd"]
+    factors_ok = positive(df["ajexdi"]) & positive(df["trfd"])
+    df["tri"] = (df["prccd"] / df["ajexdi"] * df["trfd"]).where(factors_ok)
+    bad_factors = positive(df["prccd"]) & ~factors_ok
     previous = df.groupby("sid", sort = False)[["prccd", "ajexdi", "tri"]].shift(1)
     both_valid = positive(df["tri"]) & positive(previous["tri"])
     valid = both_valid & ~df["currency_break"]
 
     df["prev_ajexdi"] = previous["ajexdi"]
-    df["ret_raw"] = (df["prccd"] / previous["prccd"] - 1).where(valid)
+    one_day = follows_previous_day(df["datadate"], df["sid"])
+    df["ret_raw"] = (df["prccd"] / previous["prccd"] - 1).where(valid & one_day)
     df["ret_adj"] = (df["tri"] / previous["tri"] - 1).where(valid)
 
     crossed = both_valid & df["currency_break"]
+    record("R2", df, crossed, "ret_adj", df["tri"] / previous["tri"] - 1, np.nan)
+    log("F2", "prices without positive adjustment factors", bad_factors.sum(), df.loc[bad_factors, "sid"].nunique())
     log("F2", "valid within-line returns", valid.sum(), df.loc[valid, "sid"].nunique())
     log("R2", "returns set to missing (currency change)", crossed.sum(), df.loc[crossed, "sid"].nunique())
     return df.drop(columns = "currency_break")
@@ -257,6 +290,8 @@ def line_returns(df):
 R5_ABS_RET = 0.30
 R5_AJ_RATIO_LOW, R5_AJ_RATIO_HIGH = 0.80, 1.25
 R5_PAIR_TOLERANCE = 0.20
+R5_REVIEW_WINDOW = 10 # rows; distant offsets are listed for review, never paired automatically
+
 # R6: genuine losses that must not be zeroed; each must be an R5 candidate.
 R5_EXEMPT = [
     ("270250_02W", "2018-08-02"),    # Countrywide: recapitalisation, aj_ratio = 1.77
@@ -275,11 +310,26 @@ def flag_exempt(df, exempt):
         flag |= hit
     return flag
 
+def review_distant_offsets(df, unpaired, window = R5_REVIEW_WINDOW):
+    """List unpaired R5 candidates that a return 2 to 'window' rows away would offset.
+    
+    Only the candidates are visited. df must be sorted by (sid, date) with a default index, which holds from block 3 on."""
+    ret, sid = df["ret_adj"].to_numpy(), df["sid"].to_numpy()
+    found = []
+    for i in np.flatnonzero(unpaired.to_numpy()):
+        near = np.arange(max(i - window, 0), min(i + window + 1, len(df)))
+        near = near[(np.abs(near - i) >= 2) & (sid[near] == sid[i])]
+        two_day = (1 + ret[i]) * (1 + ret[near]) - 1
+        if np.any(np.abs(two_day) <= R5_PAIR_TOLERANCE):
+            found.append(f"{sid[i]} {df['datadate'].iat[i].date()}")
+    _REVIEW.append(f"R5 unpaired candidates offset 2-{window} rows away: {len(found)}"
+                   + (f" ({', '.join(found)})" if found else ""))
+
 def clean_adjustments(df, exempt = R5_EXEMPT):
-    """R5: zero the return on adjustment days whose factor moves far from 1 
-    and whose adjusted return is large.
-    If an adjacent return of the same sid offset it (two-day return within +/-20%),
-    zero that return as well."""
+    """R5: on adjustment days whose factors moves far from 1 and whose adjusted return is large, 
+    the return is set to 0.
+    If a neighbouring return of the same sid offsets it (two-day return within +/-20%),
+    the pair keeps its two-day return: 0 on the earlier day, the two-day return on the later day."""
     aj_ratio = df["prev_ajexdi"] / df["ajexdi"]
     aj_change = positive(df["ajexdi"]) & positive(df["prev_ajexdi"]) & aj_ratio.ne(1)
     candidate = (df["ret_adj"].notna() & aj_change & df["ret_adj"].abs().gt(R5_ABS_RET)
@@ -292,22 +342,49 @@ def clean_adjustments(df, exempt = R5_EXEMPT):
 
     # Pair with the previous return first; use the next one only if that fails.
     grouped = df.groupby("sid", sort = False)["ret_adj"]
-    paired_with = {}
+    paired_with, two_day = {}, {}
     for name, periods in [("previous", 1), ("next", -1)]:
         neighbour = grouped.shift(periods)
-        two_day = (1 + df["ret_adj"]) * (1 + neighbour) - 1
-        paired_with[name] = target & neighbour.notna() & two_day.abs().le(R5_PAIR_TOLERANCE)
+        two_day[name] = (1 + df["ret_adj"]) * (1 + neighbour) - 1
+        paired_with[name] = (target & neighbour.notna() & two_day[name].abs().le(R5_PAIR_TOLERANCE))
     pair_prev = paired_with["previous"]
     pair_next = paired_with["next"] & ~pair_prev
-    # The neighbour row of each pair: shift the flag onto it within the sid
-    neighbour_rows = (pair_prev.groupby(df["sid"], sort = False).shift(-1, fill_value = False)
-                      | pair_next.groupby(df["sid"], sort = False).shift(1, fill_value = False))
+
+    # An exempt return must never be zeroed as a neighbour. If a candidate offsets an exempt loss,
+    # the exemption itself is in doubt: stop for a manual review.
+    by_sid = is_exempt.groupby(df["sid"], sort = False)
+    conflict = (pair_prev & by_sid.shift(1, fill_value = False) | pair_next & by_sid.shift(-1, fill_value = False))
+    if conflict.any():
+        rows = df.loc[conflict, ["sid", "datadate"]].to_string(index = False)
+        raise ValueError(
+            f"R5 candidates pair with an exempt return; review R5_EXEMPT:\n{rows}"
+        )
+
+    # A pair keeps its two-day return: 0 on the earlier day, the two-day return on the later day,
+    # so the level after the pair is the true level.
+    def shift_in_sid(values, periods, fill):
+        return values.groupby(df["sid"], sort = False).shift(periods, fill_value = fill)
+    earlier = pair_next | shift_in_sid(pair_prev, -1, False)
+    later = pair_prev | shift_in_sid(pair_next, 1, False)
+    if (earlier & later).any():
+        rows = df.loc[earlier & later, ["sid", "datadate"]].to_string(index = False)
+        raise ValueError(
+            f"overlapping R5 pairs; review by hand:\n{rows}"
+        )
+    carried = shift_in_sid(two_day["next"], 1, np.nan)
+    new_ret = df["ret_adj"].copy()
+    new_ret[target | earlier] = 0.0
+    new_ret[later] = two_day["previous"].where(pair_prev, carried)[later]
+    unpaired = target & ~earlier & ~later
+    review_distant_offsets(df, unpaired)
 
     log("R5", "candidates", candidate.sum(), df.loc[candidate, "sid"].nunique())
     log("R6", "candidates exempt from R5", is_exempt.sum(), df.loc[is_exempt, "sid"].nunique())
-    log("R5", "candidate returns set to 0", target.sum(), df.loc[target, "sid"].nunique())
-    log("R5", "paired neighbour returns set to 0", neighbour_rows.sum(), df.loc[neighbour_rows, "sid"].nunique())
-    df.loc[target | neighbour_rows, "ret_adj"] = 0.0
+    log("R5", "unpaired candidate returns set to 0", unpaired.sum(), df.loc[unpaired, "sid"].nunique())
+    log("R5", "pairs: two-day return moved to later day", later.sum(), df.loc[later, "sid"].nunique())
+    changed = unpaired | earlier | later
+    record("R5", df, changed, "ret_adj", df["ret_adj"], new_ret)
+    df["ret_adj"] = new_ret
     return df.drop(columns = "prev_ajexdi")
 
 # %% Block7. R11 Fund codes, R6 fund list, R12 country of incorporation
@@ -418,6 +495,7 @@ def select_lines(df):
     previous = df.groupby("gvkey", sort = False)["sid"].shift(1)
     switch = previous.notna() & df["sid"].ne(previous)
     df["line_switch"] = switch
+    record("R10", df, switch, "ret_adj", df["ret_adj"], np.nan)
     df.loc[switch, "ret_adj"] = np.nan
     log("R10", "switch-day returns set to missing", switch.sum(), df.loc[switch, "sid"].nunique())
 
@@ -437,9 +515,11 @@ def build_close(df):
     Written as close = tri * c, where c is constant within a company except on:
         - R5 days, where the cleaned return is not the index move, and
         - R10 switch days, where c puts the new line on the old line's level.
-    Across other missing returns (R2, R4, R6) the level follows tri.
-    Close is missing on every day whose return is missing, except a company's first day,
-    so the engine never sees a return that was removed."""
+    Across other missing returns (R2, R4, R6, R14) the level follows tri.
+    ret_adj is an observed one-day return: it is missing across missing trading days (R14)
+    and on days changed by R5, where only the level carries the cleaned move.
+    close is hidden where the engine would otherwise compute a removed return:
+    the return is missing but the previous trading day has a level."""
     by_company = df.groupby("gvkey", sort = False)
     step = df["tri"] / by_company["tri"].shift(1)
     switch = df["line_switch"]
@@ -460,14 +540,33 @@ def build_close(df):
     move[switch] = last_tri[switch] / df.loc[switch, "tri"]
     level = df["tri"] * move.groupby(df["gvkey"], sort = False).cumprod()
 
-    first_day = by_company.cumcount().eq(0)
-    hidden = df["ret_adj"].isna() & ~first_day & level.notna()
+    # The level keeps every cleaned move, but two kinds of return are not observed one-day returns and are set to missing:
+    # R14, a return across missing trading days; R5, a return changed by R5 (0, or a pair's two-day return).
+    one_day = follows_previous_day(df["datadate"], df["gvkey"])
+    multi_day = df["ret_adj"].notna() & ~one_day
+    r5_day = r5 & ~multi_day
+    record("R14", df, multi_day, "ret_adj", df["ret_adj"], np.nan)
+    record("R5", df, r5_day, "ret_adj", df["ret_adj"], np.nan)
+    df.loc[multi_day | r5_day, "ret_adj"] = np.nan
+
+    # Hide close only where the engine would otherwise compute a removed return.
+    previous_level = level.groupby(df["gvkey"], sort = False).shift(1)
+    hidden = df["ret_adj"].isna() & level.notna() & previous_level.notna() & one_day
     df["close"] = level.mask(hidden)
 
     no_price = level.isna()
-    log("R5", "zeroed returns carried into close", r5.sum(), df.loc[r5, "sid"].nunique())
+    log("R5", "changed returns carried into close", r5.sum(), df.loc[r5, "sid"].nunique())
+    log("R5", "changed returns: daily return set to missing", r5_day.sum(), df.loc[r5_day, "sid"].nunique())
+    log("R14", "returns across missing days set to missing", multi_day.sum(), df.loc[multi_day, "sid"].nunique())
     log("F2", "close missing: no valid price", no_price.sum(), df.loc[no_price, "sid"].nunique())
     log("F2", "close missing: return missing", hidden.sum(), df.loc[hidden, "sid"].nunique())
+
+    # Valid returns the engine cannot see: the day after a hidden close.
+    after_hidden = hidden.groupby(df["gvkey"], sort = False).shift(1, fill_value = False)
+    unseen = df["ret_adj"].notna() & after_hidden
+    valid = int(df["ret_adj"].notna().sum())
+    _REVIEW.append(f"Engine sees {valid - int(unseen.sum()):,} of {valid:,} valid returns; "
+                   f"{int(unseen.sum())} follow a hidden close")
     return df
 
 def add_trading_fields(df, gap = VOLUME_GAP):
@@ -520,8 +619,8 @@ def validate_output(out):
     duplicates = out.duplicated(["date", "symbol"])
     if duplicates.any():
         problems.append(f"{int(duplicates.sum())} duplicate (date, symbol) rows")
-    if not out["symbol"].str.len().eq(6).all():
-        problems.append("symbol is not a 6-character gvkey")
+    if not out["symbol"].str.fullmatch(r"\d{6}").all():
+        problems.append("symbol is not a 6-digit gvkey")
     days = trading_days()
     if not pd.DatetimeIndex(out["date"].unique()).sort_values().equals(days):
         problems.append("dates differ from the 2,779-day trading calendar")
@@ -539,15 +638,24 @@ def validate_output(out):
     if (out["is_tradable"] & out["raw_close"].isna()).any():
         problems.append("tradable rows without a price")
 
+    # Returns: ret_adj is a one-day return; the engine computes close over the previous trading day's close,
+    # and must get exactly ret_adj wherever it can.
+    out = out.sort_values(["symbol", "date"])
+    ret = out["ret_adj"].copy()
+    one_day = follows_previous_day(out["date"], out["symbol"])
+    if not (np.isfinite(ret.dropna()) & ret.dropna().gt(-1)).all():
+        problems.append("ret_adj: non-finite values or values at or below -100%")
+    if (ret.notna() & ~one_day).any():
+        problems.append(f"{int((ret.notna() & ~one_day).sum())} returns span missing trading days")
     previous = out.groupby("symbol", sort = False)["close"].shift(1)
-    both = out["close"].notna() & previous.notna()
-    error = (out["close"] / previous - 1 - out["ret_adj"])[both].abs()
+    seen = one_day & out["close"].notna() & previous.notna()
+    error = (out["close"] / previous - 1 - ret)[seen].abs()
     disagree = error.isna() | error.gt(RETURN_TOLERANCE)
     if disagree.any():
         problems.append(f"close and ret_adj disagree on {int(disagree.sum())} rows")
 
     if problems:
-        raise ValueError("output checks failed:\n" + "\n ".join(problems))
+        raise ValueError("output checks failed:\n " + "\n ".join(problems))
 
 def file_sha256(path):
     digest = hashlib.sha256()
@@ -556,24 +664,71 @@ def file_sha256(path):
             digest.update(chunk)
     return digest.hexdigest()
 
+def write_csv(frame, path, **options):
+    """Write through a temporary file, so a failed run never leaves a half-written file."""
+    path.parent.mkdir(parents = True, exist_ok = True)
+    temporary = path.with_name(path.name + ".tmp")
+    frame.to_csv(temporary, index = False, date_format = "%Y-%m-%d", float_format = "%.10g", lineterminator = "\n", **options)
+    temporary.replace(path)
+
 def write_output(df, path = OUTPUT_FILE):
     """Select and rename the output columns, check them, write a gzip CSV."""
     out = df[list(OUTPUT_COLUMNS.values())].copy()
     out.columns = list(OUTPUT_COLUMNS)
     validate_output(out)
 
-    path.parent.mkdir(parents = True, exist_ok = True)
-    out.to_csv(path, index = False, date_format = "%Y-%m-%d", float_format = "%.10g",
-               lineterminator = "\n", compression = {"method": "gzip", "mtime": 0})
+    write_csv(out, path, compression = {"method": "gzip", "mtime": 0})
     log("F1", "rows written", len(out), out["symbol"].nunique())
     _REVIEW.append(f"Output {path.name}: {path.stat().st_size / 1e6:,.1f} MB, "
                    f"SHA-256 {file_sha256(path)}")
     return out
 
+def write_company_table(df, path = COMPANY_FILE):
+    """One row per symbol: name, codes and exit data. R13 itself is applied by the engine."""
+    by_company = df.groupby("gvkey", sort = True)
+    if by_company[["sic", "fic", "dlrsn", "dldte"]].nunique(dropna = False).gt(1).any().any():
+        raise ValueError("sic, fic, dlrsn, dldte changes within a company")
+    table = by_company.agg(
+        conm = ("conm", "last"), sic = ("sic", "first"), fic = ("fic", "first"),
+        dlrsn = ("dlrsn", "first"), dldte = ("dldte", "first"),
+        first_date = ("datadate", "min"), last_date = ("datadate", "max"),
+    ).rename_axis("symbol").reset_index()
+    table["dldte"] = pd.to_datetime(table["dldte"])
+    write_csv(table,path)
+    log("F1", "company rows written", len(table), len(table))
+    exits = table["last_date"].lt(pd.Timestamp(SAMPLE_END))
+    _REVIEW.append(f"Companies whose last row is before {SAMPLE_END}: {int(exits.sum()):,}")
+
+def write_events(path = EVENT_FILE):
+    """Every row-level change made by R2, R4-R6, R10 and R14, with old and new values."""
+    events = pd.concat(_EVENTS, ignore_index = True)
+    events = events[["rule", "sid", "datadate", "field", "before", "after"]]
+    write_csv(events.rename(columns = {"datadate": "date"}), path)
+    log("F1", "change events written", len(events), events["sid"].nunique())
+
+def write_manifest(path = MANIFEST_FILE):
+    """Input, parameters, versions, the step log and output hashes of this run."""
+    manifest = {
+        "input": {"file": RAW_FILE.name, "sha256": EXPECTED_SHA256},
+        "outputs": {p.name: file_sha256(p) for p in [OUTPUT_FILE, COMPANY_FILE, EVENT_FILE]},
+        "versions": {"python": platform.python_version(), "pandas": pd.__version__, "numpy": np.__version__},
+        "parameters": {
+            "R4_FACTOR_MOVE": R4_FACTOR_MOVE, "BAD_PRINTS": BAD_PRINTS,
+            "R5_ABS_RET": R5_ABS_RET, "R5_AJ_RATIO": [R5_AJ_RATIO_LOW, R5_AJ_RATIO_HIGH],
+            "R5_PAIR_TOLERANCE": R5_PAIR_TOLERANCE, "R5_REVIEW_WINDOW": R5_REVIEW_WINDOW,
+            "R5_EXEMPT": R5_EXEMPT, "FUND_SIC": FUND_SIC, "FUND_SIDS": FUND_SIDS,
+            "KEEP_FIC": KEEP_FIC, "VOLUME_GAP": VOLUME_GAP, "NON_TRADING_DAYS": len(NON_TRADING_DAYS),
+        },
+        "log": [dict(zip(["rule", "action", "rows", "sids"], row)) for row in _LOG],
+        "review": _REVIEW,
+    }
+    path.write_text(json.dumps(manifest, indent = 2) + "\n", encoding = "utf-8")
+
 # =================================================================================================
 def main():
     _LOG.clear()
     _REVIEW.clear()
+    _EVENTS.clear()
     print_log_header()
     check_source()
     df = load()
@@ -590,6 +745,8 @@ def main():
     df = build_close(df)
     df = add_trading_fields(df)
     write_output(df)
+    write_company_table(df)
+    write_events()
     print(f"\n{'rows':<10}{len(df):>12,}")
     print(f"{'sids':<10}{df['sid'].nunique():>12,}")
     print(f"{'companies':<10}{df['gvkey'].nunique():>12,}")
@@ -597,8 +754,8 @@ def main():
     if _REVIEW:
         print("\nReview")
         print("\n".join(_REVIEW))
+    write_manifest()
     return df
 
 if __name__ == "__main__":
     main()
-# %%
