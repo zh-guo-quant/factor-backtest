@@ -4,6 +4,7 @@ ROOT = Path(__file__).resolve().parent
 
 # Locked BEFORE any results are seen. Do not change after Phase 1.
 HOLDOUT_START = "2022-01-01"
+HOLDOUT_UNLOCKED = False    #set True once, after the in-sample design is final; never back
 
 # --- Backtest settings ---
 REBALANCE = "ME"        # monthly rebalancing
