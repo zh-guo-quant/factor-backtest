@@ -221,7 +221,7 @@ def select(schedule: Schedule, sample: str = "in") -> np.ndarray:
     if sample == "holdout":
         if not config.HOLDOUT_UNLOCKED:
             raise PermissionError(
-                "the holdout is locked: set.config_HOLDOUT_UNLOCKED = True only once the " 
+                "the holdout is locked: set config.HOLDOUT_UNLOCKED = True only once the " 
                 "in-sample design is final."
             )
         return ~in_sample(schedule)
@@ -231,7 +231,111 @@ def select(schedule: Schedule, sample: str = "in") -> np.ndarray:
 
 def newey_west_t(x: pd.Series, lags: int | None = None) -> float:
     """t-statistic of the mean with Newey-West (1987) standard and Bartlett weights."""
+    x = np.asarray(x, dtype = "float64")
+    n = len(x)
+    if lags is None:
+        lags = int(4 * (n / 100) ** (2 / 9))
+    e = x - x.mean()
+    variance = e @ e / n
+    for lag in range(1, lags + 1):
+        variance += 2 * (1 - lag / (lags + 1)) * (e[lag:] @ e[:-lag]) / n
+    return x.mean() / np.sqrt(variance / n)
 
+def summarise(h: Holding, t: Trading, schedule: Schedule, sample: str = "in") -> pd.Series:
+    """Performance of one long-short portfolio on one sample, net of costs unless stated.
+    
+    Means and volatilities are annualised from period returns; the drawdown comes from daily net returns.
+    'long' and 'short' are gross leg returns: long - short is the gross spread. 
+    break-even_bps is the one-way cost at which the mean net period return is zero."""
+    periods = select(schedule, sample)
+    if periods.sum() < 2:
+        raise ValueError(
+            f"fewer than two periods in sample {sample!r}."
+        )
+    days = periods[schedule.exit.searchsorted(t.net_daily.index)]   # each day follow its period
+    rebalances = periods.copy()
+    rebalances[0] = False                                            # the initiation build is not a rebalance
+
+    gross = h.period["long_short"][periods]
+    net = t.net_period[periods]
+    turnover = t.turnover[periods]
+    legs = h.period[periods]
+
+    equity = (1 + t.net_daily[days]).cumprod()
+    drawdown = (equity / equity.cummax().clip(lower = 1.0) - 1).min()
+
+    scale = PERIODS_PER_YEAR
+    row = {
+        "months": int(periods.sum()),
+        "first": schedule.entry[periods][0].date(),
+        "last": schedule.exit[periods][-1].date(),
+        "mean": net.mean() * scale,
+        "vol": net.std() * np.sqrt(scale),
+        "sharpe": net.mean() / net.std() * np.sqrt(scale),
+        "t_nw": newey_west_t(net),
+        "hit": (net > 0).mean(),
+        "max_dd": drawdown,
+        "long": legs["long"].mean() * scale,
+        "short": legs["short"].mean() * scale,
+        "turnover": t.turnover[rebalances].mean(),
+        "cost": t.cost[rebalances].mean() * scale,
+        "break_even_bps": gross.mean() / (turnover * (1 + gross)).mean() * 1e4,
+    }
+    for bps in COST_GRID_BPS:
+        row[f"mean_{bps}"] = ((1 - bps / 1e4 * turnover) * (1 + gross) - 1).mean() * scale
+
+    if config.COST_BPS in COST_GRID_BPS and abs(row[f"mean_{config.COST_BPS}"] - row["mean"]) > 1e-12:
+        raise ValueError("the cost grid does not reproduce the net returns at config.COST_BPS.")
+    return pd.Series(row)
+
+def contributions(held: pd.DataFrame, schedule: Schedule, close: pd.DataFrame,
+                  entry: pd.Timestamp) -> pd.DataFrame:
+    """Each position's contribution to the gross long-short return of the period entered on 'entry'."""
+    k = schedule.entry.get_loc(entry)
+    w = held.loc[entry]
+    w = w[w.ne(0)]
+    levels = close.loc[entry:schedule.exit[k], w.index].astype("float64").ffill()
+    move = levels.iloc[-1] / levels.iloc[0] - 1
+    return pd.DataFrame({"weight": w, "move": move, "contrib": w * move}).sort_values("contrib")
+
+# %%
+# Block 5. Public API
+# =================================================================================================
+
+class Result(NamedTuple):
+    """Everything one backtest produced, step by step."""
+    schedule: Schedule
+    target: pd.DataFrame    # entry * symbols: target weights, before execution
+    held: pd.DataFrame      # entry * symbols: weights actually held
+    holding: Holding        # returns before costs
+    trading: Trading        # turnover, costs, returns after costs
+
+def _validate_weights(weights: pd.DataFrame) -> None:
+    """The engine backtests 1:1 long-short portfolio only."""
+    if weights.isna().any().any():
+        raise ValueError("weights contain missing values; use 0 for stocks not held.")
+    long = weights.clip(lower = 0).sum(axis = 1)
+    short = weights.clip(upper = 0).sum(axis = 1)
+    if (long - 1).abs().max() > 1e-9 or (short + 1).abs().max() > 1e-9:
+        raise ValueError("each signal data needs a long leg summing to +1 and a short leg summing to -1.")
+
+def run(weights: pd.DataFrame, close: pd.DataFrame, tradable: pd.DataFrame, cost_bps: float = config.COST_BPS) -> Result:
+    """Backtest one set of target weights stamped with their signal dates.
+    
+    The only supported way to backtest. It does not know where the weights came from:
+    a factor sort or a model's predictions go through the same steps and checks."""
+    _validate_weights(weights)
+    schedule = make_schedule(weights.index, close.index)
+    target = weights.loc[schedule.signal]
+
+    held = execute(weights, schedule, tradable, close)
+    _validate_execution(held, target, tradable, close)
+    holding = hold(held, schedule, close)
+    _validate_holding(holding, schedule, close.index)
+    trading = trade(held, holding, schedule, cost_bps)
+    _validate_trading(trading, held, schedule)
+
+    return Result(schedule = schedule, target = target, held = held, holding = holding, trading = trading)
 
 
 if __name__ == "__main__":
@@ -244,37 +348,15 @@ if __name__ == "__main__":
     raw_close = load_panel("raw_close")
 
     print(f"{'factor':<10}{'periods':>8}{'first day':>12}{'days':>7}{'dropped':>9}"
-          f"{'stale share':>13}{'turnover':>10}{'median':>8}{'max':>7}{'cost/yr':>9}")
-    diagnostics = []
+          f"{'stale share':>13}{'turnover':>10}{'cost/yr':>9}")
     for name in fx.FACTORS:
-        p = pf.build(fx.compute(name, {"close": close}), tradable, raw_close)
-        sched = make_schedule(p.weights.index, close.index)
-        held = execute(p.weights, sched, tradable, close)
-        target = p.weights.loc[sched.signal].set_axis(sched.entry)
-        _validate_execution(held, target, tradable, close)
-        h = hold(held, sched, close)
-        _validate_holding(h, sched, close.index)
-        t = trade(held, h, sched)
-        _validate_trading(t, held, sched)
+        weights = pf.build(fx.compute(name, {"close": close}), tradable, raw_close).weights
+        r = run(weights, close, tradable)
 
-        dropped = int((target.ne(0) & held.eq(0)).sum().sum())
-        ins = t.turnover.index < config.HOLDOUT_START
-        rebal = t.turnover[ins].iloc[1:]                # in-sample rebalance, initial build excluded
-        cost_year = t.cost[ins].iloc[1:].mean() * 12    # monthly rebalancing
-        print(f"{name:<10}{len(sched.entry):>8}{str(h.daily.index[0].date()):>12}{len(h.daily):>7}"
-              f"{dropped:>9}{h.stale_share:>13.3%}{rebal.mean():>10.2f}{rebal.median():>8.2f}"
-              f"{rebal.max():>7.2f}{cost_year:>9.2%}")
-        drop = target.ne(0) & held.eq(0)
-        long_side, short_side = target.gt(0), target.lt(0)
-        in_gap = (drop.index >= "2017-06-19") & (drop.index <= "2017-10-13")
-        diagnostics.append((
-            name,
-            (drop & long_side).sum().sum() / long_side.sum().sum(),
-            (drop & short_side).sum().sum() / short_side.sum().sum(),
-            int(drop.loc[in_gap].sum().sum()),
-            t.turnover[ins].idxmax().date(),
-        ))
-    print()
-    print(f"{'factor':<10}{'drop long':>11}{'drop short':>12}{'in gap':>8}{'max turnover':>14}")
-    for name, long_share, short_share, gap, peak in diagnostics:
-        print(f"{name:<10}{long_share:>11.2%}{short_share:>12.2%}{gap:>8}{str(peak):>14}")
+        rebalances = in_sample(r.schedule)
+        rebalances[0] = False                   # the initial build is not a rebalance
+        dropped = int((r.target.ne(0) & r.held.eq(0)).sum().sum())
+        print(f"{name:<10}{len(r.schedule.entry):>8}{str(r.holding.daily.index[0].date()):>12}"
+              f"{len(r.holding.daily):>7}{dropped:>9}{r.holding.stale_share:>13.3%}"
+              f"{r.trading.turnover[rebalances].mean():>10.2f}"
+              f"{r.trading.cost[rebalances].mean() * PERIODS_PER_YEAR:>9.2%}")
