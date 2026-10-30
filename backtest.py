@@ -169,6 +169,7 @@ class Trading(NamedTuple):
     cost: pd.Series         # entry: cost as a share of equity
     net_daily: pd.Series    # date: long-short returns after costs
     net_period: pd.Series   # entry: long-short period returns after costs
+    cost_bps: float         # the one-way cost this run used
 
 def trade(held: pd.DataFrame, h: Holding, schedule: Schedule, cost_bps: float = config.COST_BPS) -> Trading:
     """Turnover at each entry and the long-short returns after costs.
@@ -186,7 +187,7 @@ def trade(held: pd.DataFrame, h: Holding, schedule: Schedule, cost_bps: float = 
     charge[first_day] = cost.to_numpy()
     net_daily = (1 - charge) * (1 + h.daily["long_short"]) - 1
     net_period = (1 - cost) * (1 + h.period["long_short"]) - 1
-    return Trading(turnover = turnover, cost = cost, net_daily = net_daily, net_period = net_period)
+    return Trading(turnover = turnover, cost = cost, net_daily = net_daily, net_period = net_period, cost_bps = cost_bps)
 
 def _validate_trading(t: Trading, held: pd.DataFrame, schedule: Schedule) -> None:
     """Post-conditions of turnover and net returns."""
@@ -279,13 +280,15 @@ def summarise(h: Holding, t: Trading, schedule: Schedule, sample: str = "in") ->
         "short": legs["short"].mean() * scale,
         "turnover": t.turnover[rebalances].mean(),
         "cost": t.cost[rebalances].mean() * scale,
+        "cost_bps": t.cost_bps,
         "break_even_bps": gross.mean() / (turnover * (1 + gross)).mean() * 1e4,
     }
     for bps in COST_GRID_BPS:
         row[f"mean_{bps}"] = ((1 - bps / 1e4 * turnover) * (1 + gross) - 1).mean() * scale
 
-    if config.COST_BPS in COST_GRID_BPS and abs(row[f"mean_{config.COST_BPS}"] - row["mean"]) > 1e-12:
-        raise ValueError("the cost grid does not reproduce the net returns at config.COST_BPS.")
+    at_run = ((1 - t.cost_bps / 1e4 * turnover) * (1 + gross) - 1).mean() * scale
+    if abs(at_run - row["mean"]) > 1e-12:
+        raise ValueError("the cost formula does not reproduce the net return of this run.")
     return pd.Series(row)
 
 def contributions(held: pd.DataFrame, schedule: Schedule, close: pd.DataFrame,
@@ -326,7 +329,7 @@ def run(weights: pd.DataFrame, close: pd.DataFrame, tradable: pd.DataFrame, cost
     a factor sort or a model's predictions go through the same steps and checks."""
     _validate_weights(weights)
     schedule = make_schedule(weights.index, close.index)
-    target = weights.loc[schedule.signal]
+    target = weights.loc[schedule.signal].set_axis(schedule.entry)
 
     held = execute(weights, schedule, tradable, close)
     _validate_execution(held, target, tradable, close)

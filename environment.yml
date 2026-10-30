@@ -8,5 +8,6 @@ dependencies:
   - numpy
   - pyarrow
   - matplotlib
+  - tabulate
   - ipykernel
   - pytest
